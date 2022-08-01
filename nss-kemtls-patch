@@ -1,0 +1,5179 @@
+diff --git a/cmd/lib/secutil.c b/cmd/lib/secutil.c
+index d9270ed92..30a1d2468 100644
+--- a/cmd/lib/secutil.c
++++ b/cmd/lib/secutil.c
+@@ -4186,6 +4186,9 @@ groupNameToNamedGroup(char *name)
+         }
+     }
+     if (PL_strlen(name) == 6) {
++        if (!strncmp(name, "CECPQ3", 6)) {
++            return ssl_grp_cecpq3;
++        }
+         if (!strncmp(name, "x25519", 6)) {
+             return ssl_grp_ec_curve25519;
+         }
+diff --git a/cmd/selfserv/selfserv.c b/cmd/selfserv/selfserv.c
+index d26851d98..69587f048 100644
+--- a/cmd/selfserv/selfserv.c
++++ b/cmd/selfserv/selfserv.c
+@@ -147,6 +147,8 @@ static PRThread *acceptorThread;
+ 
+ static PRLogModuleInfo *lm;
+ 
++static PRBool enableDelegatedCredentials = PR_FALSE;
++
+ #define PRINTF   \
+     if (verbose) \
+     printf
+@@ -229,7 +231,7 @@ PrintParameterUsage()
+         "-Q enables ALPN for HTTP/1.1 [RFC7301]\n"
+         "-I comma separated list of enabled groups for TLS key exchange.\n"
+         "   The following values are valid:\n"
+-        "   P256, P384, P521, x25519, FF2048, FF3072, FF4096, FF6144, FF8192\n"
++        "   CECPQ3, P256, P384, P521, x25519, FF2048, FF3072, FF4096, FF6144, FF8192\n"
+         "-J comma separated list of enabled signature schemes in preference order.\n"
+         "   The following values are valid:\n"
+         "     rsa_pkcs1_sha1, rsa_pkcs1_sha256, rsa_pkcs1_sha384, rsa_pkcs1_sha512,\n"
+@@ -2175,13 +2177,39 @@ server_main(
+      * new, prefered API. */
+     for (i = 0; i < certNicknameIndex; i++) {
+         if (cert[i] != NULL) {
+-            const SSLExtraServerCertData ocspData = {
+-                ssl_auth_null, NULL, certStatus[i], NULL, NULL, NULL
+-            };
++            SECItem delegCred;
++            SECKEYPublicKey *dcPubKey = NULL;
++            SECKEYPrivateKey *dcPrivKey = NULL;
++
++            if (enableDelegatedCredentials) {
++                // TODO(goutam): To keep things simple for now, just blindly
++                // generate a DC. This can be refined in the future.
+ 
++                PK11SlotInfo *slot = PK11_GetBestSlot(CKM_NSS_CECPQ3_KEY_GEN, NULL);
++                if (!slot) {
++                    errExit("PK11_GetBestSlot");
++                }
++                dcPrivKey = PK11_GenerateKeyPair(slot, CKM_NSS_CECPQ3_KEY_GEN, NULL, &dcPubKey,
++                                                 PR_FALSE, PR_FALSE, NULL);
++                PK11_FreeSlot(slot);
++
++                // SSLExp_DelegateCredential
++                secStatus = SSL_DelegateCredential(cert[i], privKey[i],
++                                                   dcPubKey,
++                                                   ssl_kemtls_with_cecpq3,
++                                                   60 * 60 * 24 * 7, /* 1 week (seconds) */
++                                                   PR_Now(),
++                                                   &delegCred);
++                if (secStatus != SECSuccess) {
++                    errExit("SSL_DelegateCredential");
++                }
++            }
++            const SSLExtraServerCertData extraCertData = {
++                ssl_auth_null, NULL, certStatus[i], NULL, &delegCred, dcPrivKey
++            };
+             secStatus = SSL_ConfigServerCert(model_sock, cert[i],
+-                                             privKey[i], &ocspData,
+-                                             sizeof(ocspData));
++                                             privKey[i], &extraCertData,
++                                             sizeof(extraCertData));
+             if (secStatus != SECSuccess)
+                 errExit("SSL_ConfigServerCert");
+         }
+@@ -2540,7 +2568,7 @@ main(int argc, char **argv)
+     ** XXX: 'B', and 'q' were used in the past but removed
+     **      in 3.28, please leave some time before resuing those. */
+     optstate = PL_CreateOptState(argc, argv,
+-                                 "2:A:C:DEGH:I:J:L:M:NP:QRS:T:U:V:W:X:YZa:bc:d:e:f:g:hi:jk:lmn:op:rst:uvw:x:yz:");
++                                 "2:A:C:DEFGH:I:J:L:M:NP:QRS:T:U:V:W:X:YZa:bc:d:e:f:g:hi:jk:lmn:op:rst:uvw:x:yz:");
+     while ((status = PL_GetNextOpt(optstate)) == PL_OPT_OK) {
+         ++optionsFound;
+         switch (optstate->option) {
+@@ -2565,6 +2593,10 @@ main(int argc, char **argv)
+                 enablePostHandshakeAuth = PR_TRUE;
+                 break;
+ 
++            case 'F':
++                enableDelegatedCredentials = PR_TRUE;
++                break;
++
+             case 'H':
+                 configureDHE = (PORT_Atoi(optstate->value) != 0);
+                 break;
+diff --git a/cmd/tstclnt/tstclnt.c b/cmd/tstclnt/tstclnt.c
+index cbf824ec1..596dc2e2c 100644
+--- a/cmd/tstclnt/tstclnt.c
++++ b/cmd/tstclnt/tstclnt.c
+@@ -304,7 +304,7 @@ PrintParameterUsage()
+     fprintf(stderr, "%-20s Disconnect and reconnect up to N times total\n", "-L");
+     fprintf(stderr, "%-20s Comma separated list of enabled groups for TLS key exchange.\n"
+                     "%-20s The following values are valid:\n"
+-                    "%-20s P256, P384, P521, x25519, FF2048, FF3072, FF4096, FF6144, FF8192\n",
++                    "%-20s CECPQ3, P256, P384, P521, x25519, FF2048, FF3072, FF4096, FF6144, FF8192\n",
+             "-I", "", "");
+     fprintf(stderr, "%-20s Comma separated list of signature schemes in preference order.\n"
+                     "%-20s The following values are valid:\n"
+diff --git a/gtests/pk11_gtest/pk11_import_unittest.cc b/gtests/pk11_gtest/pk11_import_unittest.cc
+index 3dc7983f8..ec9e8cd95 100644
+--- a/gtests/pk11_gtest/pk11_import_unittest.cc
++++ b/gtests/pk11_gtest/pk11_import_unittest.cc
+@@ -91,6 +91,7 @@ class Pk11KeyImportTestBase : public ::testing::Test {
+         return pub_key->u.ec.publicValue;
+       case fortezzaKey: /* depricated */
+       case nullKey:
++      case cecpq3Key:
+         /* didn't use default here so we can catch new key types at compile time
+          */
+         break;
+diff --git a/lib/cryptohi/keythi.h b/lib/cryptohi/keythi.h
+index f6170bb78..4110431f5 100644
+--- a/lib/cryptohi/keythi.h
++++ b/lib/cryptohi/keythi.h
+@@ -9,6 +9,7 @@
+ #include "pkcs11t.h"
+ #include "secmodt.h"
+ #include "prclist.h"
++#include "blapit.h"
+ 
+ /*
+ ** RFC 4055 Section 1.2 specifies three different RSA key types.
+@@ -33,7 +34,8 @@ typedef enum {
+     keaKey = 5, /* deprecated */
+     ecKey = 6,
+     rsaPssKey = 7,
+-    rsaOaepKey = 8
++    rsaOaepKey = 8,
++    cecpq3Key = 9
+ } KeyType;
+ 
+ /*
+@@ -189,6 +191,7 @@ struct SECKEYPublicKeyStr {
+         SECKEYKEAPublicKey kea;
+         SECKEYFortezzaPublicKey fortezza;
+         SECKEYECPublicKey ec;
++        uint8_t cecpq3PublicValue[CECPQ3_PUBLICKEYBYTES];
+     } u;
+ };
+ typedef struct SECKEYPublicKeyStr SECKEYPublicKey;
+diff --git a/lib/cryptohi/seckey.c b/lib/cryptohi/seckey.c
+index fa13bc33e..ed3edca9b 100644
+--- a/lib/cryptohi/seckey.c
++++ b/lib/cryptohi/seckey.c
+@@ -666,6 +666,16 @@ seckey_ExtractPublicKey(const CERTSubjectPublicKeyInfo *spki)
+                 }
+                 break;
+ 
++            case SEC_OID_KEMTLS_WITH_CECPQ3:
++                if (newOs.len == 0) {
++                    PORT_SetError(SEC_ERROR_INPUT_LEN);
++                    break;
++                }
++                pubk->keyType = cecpq3Key;
++
++                PORT_Memcpy(pubk->u.cecpq3PublicValue, newOs.data, newOs.len);
++                return pubk;
++
+             default:
+                 PORT_SetError(SEC_ERROR_UNSUPPORTED_KEYALG);
+                 break;
+@@ -1035,6 +1045,8 @@ SECKEY_PublicKeyStrengthInBits(const SECKEYPublicKey *pubk)
+         case ecKey:
+             bitSize = SECKEY_ECParamsToKeySize(&pubk->u.ec.DEREncodedParams);
+             break;
++        case cecpq3Key:
++            break;
+         default:
+             PORT_SetError(SEC_ERROR_INVALID_KEY);
+             break;
+@@ -1197,6 +1209,19 @@ SECKEY_CopyPublicKey(const SECKEYPublicKey *pubk)
+             rv = SECITEM_CopyItem(arena, &copyk->u.ec.publicValue,
+                                   &pubk->u.ec.publicValue);
+             break;
++        case cecpq3Key:
++        {
++            // TODO(goutam): Make it possible at some point to copy from
++            // u.cecpq3PublicValue.
++            SECItem pubKeyRaw;
++            SECKEYPublicKey *unConstKey = (SECKEYPublicKey*)pubk;
++            rv = PK11_ReadRawAttribute(PK11_TypePubKey, unConstKey, CKA_VALUE, &pubKeyRaw);
++            if (rv != SECSuccess) {
++                break;
++            }
++            PORT_Memcpy(copyk->u.cecpq3PublicValue, pubKeyRaw.data, pubKeyRaw.len);
++            break;
++        }
+         case nullKey:
+             return copyk;
+         default:
+@@ -1473,6 +1498,34 @@ seckey_CreateSubjectPublicKeyInfo_helper(SECKEYPublicKey *pubk)
+                     return spki;
+                 }
+                 break;
++            case cecpq3Key:
++            {
++                SECItem cecpq3PublicValue;
++                rv = SECITEM_MakeItem(NULL, &cecpq3PublicValue, &pubk->u.cecpq3PublicValue[0], CECPQ3_PUBLICKEYBYTES);
++                if (rv != SECSuccess)
++                    break;
++
++                rv = SECOID_SetAlgorithmID(arena, &spki->algorithm,
++                                           SEC_OID_KEMTLS_WITH_CECPQ3,
++                                           &params);
++                if (rv != SECSuccess)
++                    break;
++
++                rv = SECITEM_CopyItem(arena, &spki->subjectPublicKey, &cecpq3PublicValue);
++
++                if (rv == SECSuccess) {
++                    /*
++                     * The stored value is supposed to be a BIT_STRING,
++                     * so convert the length.
++                     */
++                    spki->subjectPublicKey.len <<= 3;
++                    /*
++                     * We got a good one; return it.
++                     */
++                    return spki;
++                }
++                break;
++            }
+             case dhKey: /* later... */
+ 
+                 break;
+diff --git a/lib/freebl/blapi.h b/lib/freebl/blapi.h
+index 94fd80222..fe5b5d0ba 100644
+--- a/lib/freebl/blapi.h
++++ b/lib/freebl/blapi.h
+@@ -1791,6 +1791,14 @@ extern SECStatus EC_CopyParams(PLArenaPool *arena, ECParams *dstParams,
+  */
+ extern int EC_GetPointSize(const ECParams *params);
+ 
++/******************************************************
++** CECPQ3 algorithms
++*/
++
++extern SECStatus CECPQ3_Generate(SECItem **publicKey, SECItem **secretKey);
++extern SECStatus CECPQ3_Encapsulate(SECItem **ciphertext, SECItem **sharedSecret, uint8_t *publicKey);
++extern SECStatus CECPQ3_Decapsulate(SECItem **sharedSecret, uint8_t *ciphertext, uint8_t *secretKey);
++
+ SEC_END_PROTOS
+ 
+ #endif /* _BLAPI_H_ */
+diff --git a/lib/freebl/blapit.h b/lib/freebl/blapit.h
+index 0054e17b8..939d30ece 100644
+--- a/lib/freebl/blapit.h
++++ b/lib/freebl/blapit.h
+@@ -228,6 +228,8 @@ typedef int __BLAPI_DEPRECATED __attribute__((deprecated));
+  * to use a random value for the nonce in TLS. */
+ #define GCMIV_RANDOM_BIRTHDAY_BITS 64
+ 
++#define CECPQ3_PUBLICKEYBYTES 800
++
+ /***************************************************************************
+ ** Opaque objects
+ */
+diff --git a/lib/freebl/cecpq3.c b/lib/freebl/cecpq3.c
+new file mode 100644
+index 000000000..adf32bb20
+--- /dev/null
++++ b/lib/freebl/cecpq3.c
+@@ -0,0 +1,77 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
++
++#ifdef FREEBL_NO_DEPEND
++#include "stubs.h"
++#endif
++
++#include "blapi.h"
++#include "secerr.h"
++#include "secitem.h"
++
++#include "kyber512/api.h"
++
++SECStatus
++CECPQ3_Generate(SECItem **publicKey, SECItem **secretKey)
++{
++    *publicKey = SECITEM_AllocItem(NULL, *publicKey, PQCLEAN_KYBER512_CLEAN_CRYPTO_PUBLICKEYBYTES);
++    if (publicKey == NULL) {
++        PORT_SetError(SEC_ERROR_NO_MEMORY);
++        return SECFailure;
++    }
++
++    *secretKey = SECITEM_AllocItem(NULL, *secretKey, PQCLEAN_KYBER512_CLEAN_CRYPTO_SECRETKEYBYTES);
++    if (secretKey == NULL) {
++        PORT_SetError(SEC_ERROR_NO_MEMORY);
++        return SECFailure;
++    }
++
++    /* Generate PQ key */
++    int rc = PQCLEAN_KYBER512_CLEAN_crypto_kem_keypair((*publicKey)->data, (*secretKey)->data);
++    if (rc != 0) {
++        return SECFailure;
++    }
++
++    return SECSuccess;
++}
++
++SECStatus
++CECPQ3_Encapsulate(SECItem **ciphertext, SECItem **sharedSecret, uint8_t *publicKey)
++{
++    *ciphertext = SECITEM_AllocItem(NULL, *ciphertext, PQCLEAN_KYBER512_CLEAN_CRYPTO_CIPHERTEXTBYTES);
++    if (ciphertext == NULL) {
++        PORT_SetError(SEC_ERROR_NO_MEMORY);
++        return SECFailure;
++    }
++
++    *sharedSecret = SECITEM_AllocItem(NULL, *sharedSecret, PQCLEAN_KYBER512_CLEAN_CRYPTO_BYTES);
++    if (sharedSecret == NULL) {
++        PORT_SetError(SEC_ERROR_NO_MEMORY);
++        return SECFailure;
++    }
++
++    int rc = PQCLEAN_KYBER512_CLEAN_crypto_kem_enc((*ciphertext)->data, (*sharedSecret)->data, publicKey);
++    if (rc != 0) {
++        return SECFailure;
++    }
++
++    return SECSuccess;
++}
++
++SECStatus
++CECPQ3_Decapsulate(SECItem **sharedSecret, uint8_t *ciphertext, uint8_t *secretKey)
++{
++    *sharedSecret = SECITEM_AllocItem(NULL, *sharedSecret, PQCLEAN_KYBER512_CLEAN_CRYPTO_BYTES);
++    if (sharedSecret == NULL) {
++        PORT_SetError(SEC_ERROR_NO_MEMORY);
++        return SECFailure;
++    }
++
++    int rc = PQCLEAN_KYBER512_CLEAN_crypto_kem_dec((*sharedSecret)->data, ciphertext, secretKey);
++    if (rc != 0) {
++        return SECFailure;
++    }
++
++    return SECSuccess;
++}
+diff --git a/lib/freebl/freebl.gyp b/lib/freebl/freebl.gyp
+index 72e1b9b73..eb41f4afa 100644
+--- a/lib/freebl/freebl.gyp
++++ b/lib/freebl/freebl.gyp
+@@ -760,6 +760,7 @@
+     'include_dirs': [
+       'mpi',
+       'ecl',
++      'kyber512',
+       'verified',
+       'verified/kremlin/include',
+       'verified/kremlin/kremlib/dist/minimal',
+diff --git a/lib/freebl/freebl_base.gypi b/lib/freebl/freebl_base.gypi
+index 34b6b3c81..b60730745 100644
+--- a/lib/freebl/freebl_base.gypi
++++ b/lib/freebl/freebl_base.gypi
+@@ -61,6 +61,18 @@
+     'sysrand.c',
+     'tlsprfalg.c',
+     'secmpi.c',
++    'kyber512/cbd.c',
++    'kyber512/indcpa.c',
++    'kyber512/kem.c',
++    'kyber512/ntt.c',
++    'kyber512/poly.c',
++    'kyber512/polyvec.c',
++    'kyber512/reduce.c',
++    'kyber512/symmetric-shake.c',
++    'kyber512/verify.c',
++    'kyber512/fips202.c',
++    'kyber512/randombytes.c',
++    'cecpq3.c',
+   ],
+   'conditions': [
+     [ 'OS=="linux" or OS=="android"', {
+diff --git a/lib/freebl/kyber512/LICENSE b/lib/freebl/kyber512/LICENSE
+new file mode 100644
+index 000000000..08473af75
+--- /dev/null
++++ b/lib/freebl/kyber512/LICENSE
+@@ -0,0 +1,5 @@
++Public Domain (https://creativecommons.org/share-your-work/public-domain/cc0/)
++
++For Keccak and AES we are using public-domain
++code from sources and by authors listed in
++comments on top of the respective files.
+diff --git a/lib/freebl/kyber512/api.h b/lib/freebl/kyber512/api.h
+new file mode 100644
+index 000000000..29817fe3c
+--- /dev/null
++++ b/lib/freebl/kyber512/api.h
+@@ -0,0 +1,18 @@
++#ifndef PQCLEAN_KYBER512_CLEAN_API_H
++#define PQCLEAN_KYBER512_CLEAN_API_H
++
++#include <stdint.h>
++
++#define PQCLEAN_KYBER512_CLEAN_CRYPTO_SECRETKEYBYTES  1632
++#define PQCLEAN_KYBER512_CLEAN_CRYPTO_PUBLICKEYBYTES  800
++#define PQCLEAN_KYBER512_CLEAN_CRYPTO_CIPHERTEXTBYTES 768
++#define PQCLEAN_KYBER512_CLEAN_CRYPTO_BYTES           32
++#define PQCLEAN_KYBER512_CLEAN_CRYPTO_ALGNAME "Kyber512"
++
++int PQCLEAN_KYBER512_CLEAN_crypto_kem_keypair(uint8_t *pk, uint8_t *sk);
++
++int PQCLEAN_KYBER512_CLEAN_crypto_kem_enc(uint8_t *ct, uint8_t *ss, const uint8_t *pk);
++
++int PQCLEAN_KYBER512_CLEAN_crypto_kem_dec(uint8_t *ss, const uint8_t *ct, const uint8_t *sk);
++
++#endif
+diff --git a/lib/freebl/kyber512/cbd.c b/lib/freebl/kyber512/cbd.c
+new file mode 100644
+index 000000000..ff6613209
+--- /dev/null
++++ b/lib/freebl/kyber512/cbd.c
+@@ -0,0 +1,108 @@
++#include "cbd.h"
++#include "params.h"
++#include <stdint.h>
++
++/*************************************************
++* Name:        load32_littleendian
++*
++* Description: load 4 bytes into a 32-bit integer
++*              in little-endian order
++*
++* Arguments:   - const uint8_t *x: pointer to input byte array
++*
++* Returns 32-bit unsigned integer loaded from x
++**************************************************/
++static uint32_t load32_littleendian(const uint8_t x[4]) {
++    uint32_t r;
++    r  = (uint32_t)x[0];
++    r |= (uint32_t)x[1] << 8;
++    r |= (uint32_t)x[2] << 16;
++    r |= (uint32_t)x[3] << 24;
++    return r;
++}
++
++/*************************************************
++* Name:        load24_littleendian
++*
++* Description: load 3 bytes into a 32-bit integer
++*              in little-endian order.
++*              This function is only needed for Kyber-512
++*
++* Arguments:   - const uint8_t *x: pointer to input byte array
++*
++* Returns 32-bit unsigned integer loaded from x (most significant byte is zero)
++**************************************************/
++static uint32_t load24_littleendian(const uint8_t x[3]) {
++    uint32_t r;
++    r  = (uint32_t)x[0];
++    r |= (uint32_t)x[1] << 8;
++    r |= (uint32_t)x[2] << 16;
++    return r;
++}
++
++
++/*************************************************
++* Name:        cbd2
++*
++* Description: Given an array of uniformly random bytes, compute
++*              polynomial with coefficients distributed according to
++*              a centered binomial distribution with parameter eta=2
++*
++* Arguments:   - poly *r: pointer to output polynomial
++*              - const uint8_t *buf: pointer to input byte array
++**************************************************/
++static void cbd2(poly *r, const uint8_t buf[2 * KYBER_N / 4]) {
++    unsigned int i, j;
++    uint32_t t, d;
++    int16_t a, b;
++
++    for (i = 0; i < KYBER_N / 8; i++) {
++        t  = load32_littleendian(buf + 4 * i);
++        d  = t & 0x55555555;
++        d += (t >> 1) & 0x55555555;
++
++        for (j = 0; j < 8; j++) {
++            a = (d >> (4 * j + 0)) & 0x3;
++            b = (d >> (4 * j + 2)) & 0x3;
++            r->coeffs[8 * i + j] = a - b;
++        }
++    }
++}
++
++/*************************************************
++* Name:        cbd3
++*
++* Description: Given an array of uniformly random bytes, compute
++*              polynomial with coefficients distributed according to
++*              a centered binomial distribution with parameter eta=3.
++*              This function is only needed for Kyber-512
++*
++* Arguments:   - poly *r: pointer to output polynomial
++*              - const uint8_t *buf: pointer to input byte array
++**************************************************/
++static void cbd3(poly *r, const uint8_t buf[3 * KYBER_N / 4]) {
++    unsigned int i, j;
++    uint32_t t, d;
++    int16_t a, b;
++
++    for (i = 0; i < KYBER_N / 4; i++) {
++        t  = load24_littleendian(buf + 3 * i);
++        d  = t & 0x00249249;
++        d += (t >> 1) & 0x00249249;
++        d += (t >> 2) & 0x00249249;
++
++        for (j = 0; j < 4; j++) {
++            a = (d >> (6 * j + 0)) & 0x7;
++            b = (d >> (6 * j + 3)) & 0x7;
++            r->coeffs[4 * i + j] = a - b;
++        }
++    }
++}
++
++void PQCLEAN_KYBER512_CLEAN_poly_cbd_eta1(poly *r, const uint8_t buf[KYBER_ETA1 * KYBER_N / 4]) {
++    cbd3(r, buf);
++}
++
++void PQCLEAN_KYBER512_CLEAN_poly_cbd_eta2(poly *r, const uint8_t buf[KYBER_ETA2 * KYBER_N / 4]) {
++    cbd2(r, buf);
++}
+diff --git a/lib/freebl/kyber512/cbd.h b/lib/freebl/kyber512/cbd.h
+new file mode 100644
+index 000000000..fc8788b33
+--- /dev/null
++++ b/lib/freebl/kyber512/cbd.h
+@@ -0,0 +1,11 @@
++#ifndef PQCLEAN_KYBER512_CLEAN_CBD_H
++#define PQCLEAN_KYBER512_CLEAN_CBD_H
++#include "params.h"
++#include "poly.h"
++#include <stdint.h>
++
++void PQCLEAN_KYBER512_CLEAN_poly_cbd_eta1(poly *r, const uint8_t buf[KYBER_ETA1 * KYBER_N / 4]);
++
++void PQCLEAN_KYBER512_CLEAN_poly_cbd_eta2(poly *r, const uint8_t buf[KYBER_ETA2 * KYBER_N / 4]);
++
++#endif
+diff --git a/lib/freebl/kyber512/fips202.c b/lib/freebl/kyber512/fips202.c
+new file mode 100644
+index 000000000..6a13446b0
+--- /dev/null
++++ b/lib/freebl/kyber512/fips202.c
+@@ -0,0 +1,929 @@
++/* Based on the public domain implementation in
++ * crypto_hash/keccakc512/simple/ from http://bench.cr.yp.to/supercop.html
++ * by Ronny Van Keer
++ * and the public domain "TweetFips202" implementation
++ * from https://twitter.com/tweetfips202
++ * by Gilles Van Assche, Daniel J. Bernstein, and Peter Schwabe */
++
++#include <stddef.h>
++#include <stdint.h>
++#include <stdlib.h>
++#include <string.h>
++
++#include "fips202.h"
++
++#define NROUNDS 24
++#define ROL(a, offset) (((a) << (offset)) ^ ((a) >> (64 - (offset))))
++
++/*************************************************
++ * Name:        load64
++ *
++ * Description: Load 8 bytes into uint64_t in little-endian order
++ *
++ * Arguments:   - const uint8_t *x: pointer to input byte array
++ *
++ * Returns the loaded 64-bit unsigned integer
++ **************************************************/
++static uint64_t load64(const uint8_t *x) {
++    uint64_t r = 0;
++    for (size_t i = 0; i < 8; ++i) {
++        r |= (uint64_t)x[i] << 8 * i;
++    }
++
++    return r;
++}
++
++/*************************************************
++ * Name:        store64
++ *
++ * Description: Store a 64-bit integer to a byte array in little-endian order
++ *
++ * Arguments:   - uint8_t *x: pointer to the output byte array
++ *              - uint64_t u: input 64-bit unsigned integer
++ **************************************************/
++static void store64(uint8_t *x, uint64_t u) {
++    for (size_t i = 0; i < 8; ++i) {
++        x[i] = (uint8_t) (u >> 8 * i);
++    }
++}
++
++/* Keccak round constants */
++static const uint64_t KeccakF_RoundConstants[NROUNDS] = {
++    0x0000000000000001ULL, 0x0000000000008082ULL,
++    0x800000000000808aULL, 0x8000000080008000ULL,
++    0x000000000000808bULL, 0x0000000080000001ULL,
++    0x8000000080008081ULL, 0x8000000000008009ULL,
++    0x000000000000008aULL, 0x0000000000000088ULL,
++    0x0000000080008009ULL, 0x000000008000000aULL,
++    0x000000008000808bULL, 0x800000000000008bULL,
++    0x8000000000008089ULL, 0x8000000000008003ULL,
++    0x8000000000008002ULL, 0x8000000000000080ULL,
++    0x000000000000800aULL, 0x800000008000000aULL,
++    0x8000000080008081ULL, 0x8000000000008080ULL,
++    0x0000000080000001ULL, 0x8000000080008008ULL
++};
++
++/*************************************************
++ * Name:        KeccakF1600_StatePermute
++ *
++ * Description: The Keccak F1600 Permutation
++ *
++ * Arguments:   - uint64_t *state: pointer to input/output Keccak state
++ **************************************************/
++static void KeccakF1600_StatePermute(uint64_t *state) {
++    int round;
++
++    uint64_t Aba, Abe, Abi, Abo, Abu;
++    uint64_t Aga, Age, Agi, Ago, Agu;
++    uint64_t Aka, Ake, Aki, Ako, Aku;
++    uint64_t Ama, Ame, Ami, Amo, Amu;
++    uint64_t Asa, Ase, Asi, Aso, Asu;
++    uint64_t BCa, BCe, BCi, BCo, BCu;
++    uint64_t Da, De, Di, Do, Du;
++    uint64_t Eba, Ebe, Ebi, Ebo, Ebu;
++    uint64_t Ega, Ege, Egi, Ego, Egu;
++    uint64_t Eka, Eke, Eki, Eko, Eku;
++    uint64_t Ema, Eme, Emi, Emo, Emu;
++    uint64_t Esa, Ese, Esi, Eso, Esu;
++
++    // copyFromState(A, state)
++    Aba = state[0];
++    Abe = state[1];
++    Abi = state[2];
++    Abo = state[3];
++    Abu = state[4];
++    Aga = state[5];
++    Age = state[6];
++    Agi = state[7];
++    Ago = state[8];
++    Agu = state[9];
++    Aka = state[10];
++    Ake = state[11];
++    Aki = state[12];
++    Ako = state[13];
++    Aku = state[14];
++    Ama = state[15];
++    Ame = state[16];
++    Ami = state[17];
++    Amo = state[18];
++    Amu = state[19];
++    Asa = state[20];
++    Ase = state[21];
++    Asi = state[22];
++    Aso = state[23];
++    Asu = state[24];
++
++    for (round = 0; round < NROUNDS; round += 2) {
++        //    prepareTheta
++        BCa = Aba ^ Aga ^ Aka ^ Ama ^ Asa;
++        BCe = Abe ^ Age ^ Ake ^ Ame ^ Ase;
++        BCi = Abi ^ Agi ^ Aki ^ Ami ^ Asi;
++        BCo = Abo ^ Ago ^ Ako ^ Amo ^ Aso;
++        BCu = Abu ^ Agu ^ Aku ^ Amu ^ Asu;
++
++        // thetaRhoPiChiIotaPrepareTheta(round  , A, E)
++        Da = BCu ^ ROL(BCe, 1);
++        De = BCa ^ ROL(BCi, 1);
++        Di = BCe ^ ROL(BCo, 1);
++        Do = BCi ^ ROL(BCu, 1);
++        Du = BCo ^ ROL(BCa, 1);
++
++        Aba ^= Da;
++        BCa = Aba;
++        Age ^= De;
++        BCe = ROL(Age, 44);
++        Aki ^= Di;
++        BCi = ROL(Aki, 43);
++        Amo ^= Do;
++        BCo = ROL(Amo, 21);
++        Asu ^= Du;
++        BCu = ROL(Asu, 14);
++        Eba = BCa ^ ((~BCe) & BCi);
++        Eba ^= KeccakF_RoundConstants[round];
++        Ebe = BCe ^ ((~BCi) & BCo);
++        Ebi = BCi ^ ((~BCo) & BCu);
++        Ebo = BCo ^ ((~BCu) & BCa);
++        Ebu = BCu ^ ((~BCa) & BCe);
++
++        Abo ^= Do;
++        BCa = ROL(Abo, 28);
++        Agu ^= Du;
++        BCe = ROL(Agu, 20);
++        Aka ^= Da;
++        BCi = ROL(Aka, 3);
++        Ame ^= De;
++        BCo = ROL(Ame, 45);
++        Asi ^= Di;
++        BCu = ROL(Asi, 61);
++        Ega = BCa ^ ((~BCe) & BCi);
++        Ege = BCe ^ ((~BCi) & BCo);
++        Egi = BCi ^ ((~BCo) & BCu);
++        Ego = BCo ^ ((~BCu) & BCa);
++        Egu = BCu ^ ((~BCa) & BCe);
++
++        Abe ^= De;
++        BCa = ROL(Abe, 1);
++        Agi ^= Di;
++        BCe = ROL(Agi, 6);
++        Ako ^= Do;
++        BCi = ROL(Ako, 25);
++        Amu ^= Du;
++        BCo = ROL(Amu, 8);
++        Asa ^= Da;
++        BCu = ROL(Asa, 18);
++        Eka = BCa ^ ((~BCe) & BCi);
++        Eke = BCe ^ ((~BCi) & BCo);
++        Eki = BCi ^ ((~BCo) & BCu);
++        Eko = BCo ^ ((~BCu) & BCa);
++        Eku = BCu ^ ((~BCa) & BCe);
++
++        Abu ^= Du;
++        BCa = ROL(Abu, 27);
++        Aga ^= Da;
++        BCe = ROL(Aga, 36);
++        Ake ^= De;
++        BCi = ROL(Ake, 10);
++        Ami ^= Di;
++        BCo = ROL(Ami, 15);
++        Aso ^= Do;
++        BCu = ROL(Aso, 56);
++        Ema = BCa ^ ((~BCe) & BCi);
++        Eme = BCe ^ ((~BCi) & BCo);
++        Emi = BCi ^ ((~BCo) & BCu);
++        Emo = BCo ^ ((~BCu) & BCa);
++        Emu = BCu ^ ((~BCa) & BCe);
++
++        Abi ^= Di;
++        BCa = ROL(Abi, 62);
++        Ago ^= Do;
++        BCe = ROL(Ago, 55);
++        Aku ^= Du;
++        BCi = ROL(Aku, 39);
++        Ama ^= Da;
++        BCo = ROL(Ama, 41);
++        Ase ^= De;
++        BCu = ROL(Ase, 2);
++        Esa = BCa ^ ((~BCe) & BCi);
++        Ese = BCe ^ ((~BCi) & BCo);
++        Esi = BCi ^ ((~BCo) & BCu);
++        Eso = BCo ^ ((~BCu) & BCa);
++        Esu = BCu ^ ((~BCa) & BCe);
++
++        //    prepareTheta
++        BCa = Eba ^ Ega ^ Eka ^ Ema ^ Esa;
++        BCe = Ebe ^ Ege ^ Eke ^ Eme ^ Ese;
++        BCi = Ebi ^ Egi ^ Eki ^ Emi ^ Esi;
++        BCo = Ebo ^ Ego ^ Eko ^ Emo ^ Eso;
++        BCu = Ebu ^ Egu ^ Eku ^ Emu ^ Esu;
++
++        // thetaRhoPiChiIotaPrepareTheta(round+1, E, A)
++        Da = BCu ^ ROL(BCe, 1);
++        De = BCa ^ ROL(BCi, 1);
++        Di = BCe ^ ROL(BCo, 1);
++        Do = BCi ^ ROL(BCu, 1);
++        Du = BCo ^ ROL(BCa, 1);
++
++        Eba ^= Da;
++        BCa = Eba;
++        Ege ^= De;
++        BCe = ROL(Ege, 44);
++        Eki ^= Di;
++        BCi = ROL(Eki, 43);
++        Emo ^= Do;
++        BCo = ROL(Emo, 21);
++        Esu ^= Du;
++        BCu = ROL(Esu, 14);
++        Aba = BCa ^ ((~BCe) & BCi);
++        Aba ^= KeccakF_RoundConstants[round + 1];
++        Abe = BCe ^ ((~BCi) & BCo);
++        Abi = BCi ^ ((~BCo) & BCu);
++        Abo = BCo ^ ((~BCu) & BCa);
++        Abu = BCu ^ ((~BCa) & BCe);
++
++        Ebo ^= Do;
++        BCa = ROL(Ebo, 28);
++        Egu ^= Du;
++        BCe = ROL(Egu, 20);
++        Eka ^= Da;
++        BCi = ROL(Eka, 3);
++        Eme ^= De;
++        BCo = ROL(Eme, 45);
++        Esi ^= Di;
++        BCu = ROL(Esi, 61);
++        Aga = BCa ^ ((~BCe) & BCi);
++        Age = BCe ^ ((~BCi) & BCo);
++        Agi = BCi ^ ((~BCo) & BCu);
++        Ago = BCo ^ ((~BCu) & BCa);
++        Agu = BCu ^ ((~BCa) & BCe);
++
++        Ebe ^= De;
++        BCa = ROL(Ebe, 1);
++        Egi ^= Di;
++        BCe = ROL(Egi, 6);
++        Eko ^= Do;
++        BCi = ROL(Eko, 25);
++        Emu ^= Du;
++        BCo = ROL(Emu, 8);
++        Esa ^= Da;
++        BCu = ROL(Esa, 18);
++        Aka = BCa ^ ((~BCe) & BCi);
++        Ake = BCe ^ ((~BCi) & BCo);
++        Aki = BCi ^ ((~BCo) & BCu);
++        Ako = BCo ^ ((~BCu) & BCa);
++        Aku = BCu ^ ((~BCa) & BCe);
++
++        Ebu ^= Du;
++        BCa = ROL(Ebu, 27);
++        Ega ^= Da;
++        BCe = ROL(Ega, 36);
++        Eke ^= De;
++        BCi = ROL(Eke, 10);
++        Emi ^= Di;
++        BCo = ROL(Emi, 15);
++        Eso ^= Do;
++        BCu = ROL(Eso, 56);
++        Ama = BCa ^ ((~BCe) & BCi);
++        Ame = BCe ^ ((~BCi) & BCo);
++        Ami = BCi ^ ((~BCo) & BCu);
++        Amo = BCo ^ ((~BCu) & BCa);
++        Amu = BCu ^ ((~BCa) & BCe);
++
++        Ebi ^= Di;
++        BCa = ROL(Ebi, 62);
++        Ego ^= Do;
++        BCe = ROL(Ego, 55);
++        Eku ^= Du;
++        BCi = ROL(Eku, 39);
++        Ema ^= Da;
++        BCo = ROL(Ema, 41);
++        Ese ^= De;
++        BCu = ROL(Ese, 2);
++        Asa = BCa ^ ((~BCe) & BCi);
++        Ase = BCe ^ ((~BCi) & BCo);
++        Asi = BCi ^ ((~BCo) & BCu);
++        Aso = BCo ^ ((~BCu) & BCa);
++        Asu = BCu ^ ((~BCa) & BCe);
++    }
++
++    // copyToState(state, A)
++    state[0] = Aba;
++    state[1] = Abe;
++    state[2] = Abi;
++    state[3] = Abo;
++    state[4] = Abu;
++    state[5] = Aga;
++    state[6] = Age;
++    state[7] = Agi;
++    state[8] = Ago;
++    state[9] = Agu;
++    state[10] = Aka;
++    state[11] = Ake;
++    state[12] = Aki;
++    state[13] = Ako;
++    state[14] = Aku;
++    state[15] = Ama;
++    state[16] = Ame;
++    state[17] = Ami;
++    state[18] = Amo;
++    state[19] = Amu;
++    state[20] = Asa;
++    state[21] = Ase;
++    state[22] = Asi;
++    state[23] = Aso;
++    state[24] = Asu;
++}
++
++/*************************************************
++ * Name:        keccak_absorb
++ *
++ * Description: Absorb step of Keccak;
++ *              non-incremental, starts by zeroeing the state.
++ *
++ * Arguments:   - uint64_t *s: pointer to (uninitialized) output Keccak state
++ *              - uint32_t r: rate in bytes (e.g., 168 for SHAKE128)
++ *              - const uint8_t *m: pointer to input to be absorbed into s
++ *              - size_t mlen: length of input in bytes
++ *              - uint8_t p: domain-separation byte for different
++ *                                 Keccak-derived functions
++ **************************************************/
++static void keccak_absorb(uint64_t *s, uint32_t r, const uint8_t *m,
++                          size_t mlen, uint8_t p) {
++    size_t i;
++    uint8_t t[200];
++
++    /* Zero state */
++    for (i = 0; i < 25; ++i) {
++        s[i] = 0;
++    }
++
++    while (mlen >= r) {
++        for (i = 0; i < r / 8; ++i) {
++            s[i] ^= load64(m + 8 * i);
++        }
++
++        KeccakF1600_StatePermute(s);
++        mlen -= r;
++        m += r;
++    }
++
++    for (i = 0; i < r; ++i) {
++        t[i] = 0;
++    }
++    for (i = 0; i < mlen; ++i) {
++        t[i] = m[i];
++    }
++    t[i] = p;
++    t[r - 1] |= 128;
++    for (i = 0; i < r / 8; ++i) {
++        s[i] ^= load64(t + 8 * i);
++    }
++}
++
++/*************************************************
++ * Name:        keccak_squeezeblocks
++ *
++ * Description: Squeeze step of Keccak. Squeezes full blocks of r bytes each.
++ *              Modifies the state. Can be called multiple times to keep
++ *              squeezing, i.e., is incremental.
++ *
++ * Arguments:   - uint8_t *h: pointer to output blocks
++ *              - size_t nblocks: number of blocks to be
++ *                                                squeezed (written to h)
++ *              - uint64_t *s: pointer to input/output Keccak state
++ *              - uint32_t r: rate in bytes (e.g., 168 for SHAKE128)
++ **************************************************/
++static void keccak_squeezeblocks(uint8_t *h, size_t nblocks,
++                                 uint64_t *s, uint32_t r) {
++    while (nblocks > 0) {
++        KeccakF1600_StatePermute(s);
++        for (size_t i = 0; i < (r >> 3); i++) {
++            store64(h + 8 * i, s[i]);
++        }
++        h += r;
++        nblocks--;
++    }
++}
++
++/*************************************************
++ * Name:        keccak_inc_init
++ *
++ * Description: Initializes the incremental Keccak state to zero.
++ *
++ * Arguments:   - uint64_t *s_inc: pointer to input/output incremental state
++ *                First 25 values represent Keccak state.
++ *                26th value represents either the number of absorbed bytes
++ *                that have not been permuted, or not-yet-squeezed bytes.
++ **************************************************/
++static void keccak_inc_init(uint64_t *s_inc) {
++    size_t i;
++
++    for (i = 0; i < 25; ++i) {
++        s_inc[i] = 0;
++    }
++    s_inc[25] = 0;
++}
++
++/*************************************************
++ * Name:        keccak_inc_absorb
++ *
++ * Description: Incremental keccak absorb
++ *              Preceded by keccak_inc_init, succeeded by keccak_inc_finalize
++ *
++ * Arguments:   - uint64_t *s_inc: pointer to input/output incremental state
++ *                First 25 values represent Keccak state.
++ *                26th value represents either the number of absorbed bytes
++ *                that have not been permuted, or not-yet-squeezed bytes.
++ *              - uint32_t r: rate in bytes (e.g., 168 for SHAKE128)
++ *              - const uint8_t *m: pointer to input to be absorbed into s
++ *              - size_t mlen: length of input in bytes
++ **************************************************/
++static void keccak_inc_absorb(uint64_t *s_inc, uint32_t r, const uint8_t *m,
++                              size_t mlen) {
++    size_t i;
++
++    /* Recall that s_inc[25] is the non-absorbed bytes xored into the state */
++    while (mlen + s_inc[25] >= r) {
++        for (i = 0; i < r - (uint32_t)s_inc[25]; i++) {
++            /* Take the i'th byte from message
++               xor with the s_inc[25] + i'th byte of the state; little-endian */
++            s_inc[(s_inc[25] + i) >> 3] ^= (uint64_t)m[i] << (8 * ((s_inc[25] + i) & 0x07));
++        }
++        mlen -= (size_t)(r - s_inc[25]);
++        m += r - s_inc[25];
++        s_inc[25] = 0;
++
++        KeccakF1600_StatePermute(s_inc);
++    }
++
++    for (i = 0; i < mlen; i++) {
++        s_inc[(s_inc[25] + i) >> 3] ^= (uint64_t)m[i] << (8 * ((s_inc[25] + i) & 0x07));
++    }
++    s_inc[25] += mlen;
++}
++
++/*************************************************
++ * Name:        keccak_inc_finalize
++ *
++ * Description: Finalizes Keccak absorb phase, prepares for squeezing
++ *
++ * Arguments:   - uint64_t *s_inc: pointer to input/output incremental state
++ *                First 25 values represent Keccak state.
++ *                26th value represents either the number of absorbed bytes
++ *                that have not been permuted, or not-yet-squeezed bytes.
++ *              - uint32_t r: rate in bytes (e.g., 168 for SHAKE128)
++ *              - uint8_t p: domain-separation byte for different
++ *                                 Keccak-derived functions
++ **************************************************/
++static void keccak_inc_finalize(uint64_t *s_inc, uint32_t r, uint8_t p) {
++    /* After keccak_inc_absorb, we are guaranteed that s_inc[25] < r,
++       so we can always use one more byte for p in the current state. */
++    s_inc[s_inc[25] >> 3] ^= (uint64_t)p << (8 * (s_inc[25] & 0x07));
++    s_inc[(r - 1) >> 3] ^= (uint64_t)128 << (8 * ((r - 1) & 0x07));
++    s_inc[25] = 0;
++}
++
++/*************************************************
++ * Name:        keccak_inc_squeeze
++ *
++ * Description: Incremental Keccak squeeze; can be called on byte-level
++ *
++ * Arguments:   - uint8_t *h: pointer to output bytes
++ *              - size_t outlen: number of bytes to be squeezed
++ *              - uint64_t *s_inc: pointer to input/output incremental state
++ *                First 25 values represent Keccak state.
++ *                26th value represents either the number of absorbed bytes
++ *                that have not been permuted, or not-yet-squeezed bytes.
++ *              - uint32_t r: rate in bytes (e.g., 168 for SHAKE128)
++ **************************************************/
++static void keccak_inc_squeeze(uint8_t *h, size_t outlen,
++                               uint64_t *s_inc, uint32_t r) {
++    size_t i;
++
++    /* First consume any bytes we still have sitting around */
++    for (i = 0; i < outlen && i < s_inc[25]; i++) {
++        /* There are s_inc[25] bytes left, so r - s_inc[25] is the first
++           available byte. We consume from there, i.e., up to r. */
++        h[i] = (uint8_t)(s_inc[(r - s_inc[25] + i) >> 3] >> (8 * ((r - s_inc[25] + i) & 0x07)));
++    }
++    h += i;
++    outlen -= i;
++    s_inc[25] -= i;
++
++    /* Then squeeze the remaining necessary blocks */
++    while (outlen > 0) {
++        KeccakF1600_StatePermute(s_inc);
++
++        for (i = 0; i < outlen && i < r; i++) {
++            h[i] = (uint8_t)(s_inc[i >> 3] >> (8 * (i & 0x07)));
++        }
++        h += i;
++        outlen -= i;
++        s_inc[25] = r - i;
++    }
++}
++
++void shake128_inc_init(shake128incctx *state) {
++    state->ctx = malloc(PQC_SHAKEINCCTX_BYTES);
++    if (state->ctx == NULL) {
++        exit(111);
++    }
++    keccak_inc_init(state->ctx);
++}
++
++void shake128_inc_absorb(shake128incctx *state, const uint8_t *input, size_t inlen) {
++    keccak_inc_absorb(state->ctx, SHAKE128_RATE, input, inlen);
++}
++
++void shake128_inc_finalize(shake128incctx *state) {
++    keccak_inc_finalize(state->ctx, SHAKE128_RATE, 0x1F);
++}
++
++void shake128_inc_squeeze(uint8_t *output, size_t outlen, shake128incctx *state) {
++    keccak_inc_squeeze(output, outlen, state->ctx, SHAKE128_RATE);
++}
++
++void shake128_inc_ctx_clone(shake128incctx *dest, const shake128incctx *src) {
++    dest->ctx = malloc(PQC_SHAKEINCCTX_BYTES);
++    if (dest->ctx == NULL) {
++        exit(111);
++    }
++    memcpy(dest->ctx, src->ctx, PQC_SHAKEINCCTX_BYTES);
++}
++
++void shake128_inc_ctx_release(shake128incctx *state) {
++    free(state->ctx);
++}
++
++void shake256_inc_init(shake256incctx *state) {
++    state->ctx = malloc(PQC_SHAKEINCCTX_BYTES);
++    if (state->ctx == NULL) {
++        exit(111);
++    }
++    keccak_inc_init(state->ctx);
++}
++
++void shake256_inc_absorb(shake256incctx *state, const uint8_t *input, size_t inlen) {
++    keccak_inc_absorb(state->ctx, SHAKE256_RATE, input, inlen);
++}
++
++void shake256_inc_finalize(shake256incctx *state) {
++    keccak_inc_finalize(state->ctx, SHAKE256_RATE, 0x1F);
++}
++
++void shake256_inc_squeeze(uint8_t *output, size_t outlen, shake256incctx *state) {
++    keccak_inc_squeeze(output, outlen, state->ctx, SHAKE256_RATE);
++}
++
++void shake256_inc_ctx_clone(shake256incctx *dest, const shake256incctx *src) {
++    dest->ctx = malloc(PQC_SHAKEINCCTX_BYTES);
++    if (dest->ctx == NULL) {
++        exit(111);
++    }
++    memcpy(dest->ctx, src->ctx, PQC_SHAKEINCCTX_BYTES);
++}
++
++void shake256_inc_ctx_release(shake256incctx *state) {
++    free(state->ctx);
++}
++
++
++/*************************************************
++ * Name:        shake128_absorb
++ *
++ * Description: Absorb step of the SHAKE128 XOF.
++ *              non-incremental, starts by zeroeing the state.
++ *
++ * Arguments:   - uint64_t *s: pointer to (uninitialized) output Keccak state
++ *              - const uint8_t *input: pointer to input to be absorbed
++ *                                            into s
++ *              - size_t inlen: length of input in bytes
++ **************************************************/
++void shake128_absorb(shake128ctx *state, const uint8_t *input, size_t inlen) {
++    state->ctx = malloc(PQC_SHAKECTX_BYTES);
++    if (state->ctx == NULL) {
++        exit(111);
++    }
++    keccak_absorb(state->ctx, SHAKE128_RATE, input, inlen, 0x1F);
++}
++
++/*************************************************
++ * Name:        shake128_squeezeblocks
++ *
++ * Description: Squeeze step of SHAKE128 XOF. Squeezes full blocks of
++ *              SHAKE128_RATE bytes each. Modifies the state. Can be called
++ *              multiple times to keep squeezing, i.e., is incremental.
++ *
++ * Arguments:   - uint8_t *output: pointer to output blocks
++ *              - size_t nblocks: number of blocks to be squeezed
++ *                                            (written to output)
++ *              - shake128ctx *state: pointer to input/output Keccak state
++ **************************************************/
++void shake128_squeezeblocks(uint8_t *output, size_t nblocks, shake128ctx *state) {
++    keccak_squeezeblocks(output, nblocks, state->ctx, SHAKE128_RATE);
++}
++
++void shake128_ctx_clone(shake128ctx *dest, const shake128ctx *src) {
++    dest->ctx = malloc(PQC_SHAKECTX_BYTES);
++    if (dest->ctx == NULL) {
++        exit(111);
++    }
++    memcpy(dest->ctx, src->ctx, PQC_SHAKECTX_BYTES);
++}
++
++/** Release the allocated state. Call only once. */
++void shake128_ctx_release(shake128ctx *state) {
++    free(state->ctx);
++}
++
++/*************************************************
++ * Name:        shake256_absorb
++ *
++ * Description: Absorb step of the SHAKE256 XOF.
++ *              non-incremental, starts by zeroeing the state.
++ *
++ * Arguments:   - shake256ctx *state: pointer to (uninitialized) output Keccak state
++ *              - const uint8_t *input: pointer to input to be absorbed
++ *                                            into s
++ *              - size_t inlen: length of input in bytes
++ **************************************************/
++void shake256_absorb(shake256ctx *state, const uint8_t *input, size_t inlen) {
++    state->ctx = malloc(PQC_SHAKECTX_BYTES);
++    if (state->ctx == NULL) {
++        exit(111);
++    }
++    keccak_absorb(state->ctx, SHAKE256_RATE, input, inlen, 0x1F);
++}
++
++/*************************************************
++ * Name:        shake256_squeezeblocks
++ *
++ * Description: Squeeze step of SHAKE256 XOF. Squeezes full blocks of
++ *              SHAKE256_RATE bytes each. Modifies the state. Can be called
++ *              multiple times to keep squeezing, i.e., is incremental.
++ *
++ * Arguments:   - uint8_t *output: pointer to output blocks
++ *              - size_t nblocks: number of blocks to be squeezed
++ *                                (written to output)
++ *              - shake256ctx *state: pointer to input/output Keccak state
++ **************************************************/
++void shake256_squeezeblocks(uint8_t *output, size_t nblocks, shake256ctx *state) {
++    keccak_squeezeblocks(output, nblocks, state->ctx, SHAKE256_RATE);
++}
++
++void shake256_ctx_clone(shake256ctx *dest, const shake256ctx *src) {
++    dest->ctx = malloc(PQC_SHAKECTX_BYTES);
++    if (dest->ctx == NULL) {
++        exit(111);
++    }
++    memcpy(dest->ctx, src->ctx, PQC_SHAKECTX_BYTES);
++}
++
++/** Release the allocated state. Call only once. */
++void shake256_ctx_release(shake256ctx *state) {
++    free(state->ctx);
++}
++
++/*************************************************
++ * Name:        shake128
++ *
++ * Description: SHAKE128 XOF with non-incremental API
++ *
++ * Arguments:   - uint8_t *output: pointer to output
++ *              - size_t outlen: requested output length in bytes
++ *              - const uint8_t *input: pointer to input
++ *              - size_t inlen: length of input in bytes
++ **************************************************/
++void shake128(uint8_t *output, size_t outlen,
++              const uint8_t *input, size_t inlen) {
++    size_t nblocks = outlen / SHAKE128_RATE;
++    uint8_t t[SHAKE128_RATE];
++    shake128ctx s;
++
++    shake128_absorb(&s, input, inlen);
++    shake128_squeezeblocks(output, nblocks, &s);
++
++    output += nblocks * SHAKE128_RATE;
++    outlen -= nblocks * SHAKE128_RATE;
++
++    if (outlen) {
++        shake128_squeezeblocks(t, 1, &s);
++        for (size_t i = 0; i < outlen; ++i) {
++            output[i] = t[i];
++        }
++    }
++    shake128_ctx_release(&s);
++}
++
++/*************************************************
++ * Name:        shake256
++ *
++ * Description: SHAKE256 XOF with non-incremental API
++ *
++ * Arguments:   - uint8_t *output: pointer to output
++ *              - size_t outlen: requested output length in bytes
++ *              - const uint8_t *input: pointer to input
++ *              - size_t inlen: length of input in bytes
++ **************************************************/
++void shake256(uint8_t *output, size_t outlen,
++              const uint8_t *input, size_t inlen) {
++    size_t nblocks = outlen / SHAKE256_RATE;
++    uint8_t t[SHAKE256_RATE];
++    shake256ctx s;
++
++    shake256_absorb(&s, input, inlen);
++    shake256_squeezeblocks(output, nblocks, &s);
++
++    output += nblocks * SHAKE256_RATE;
++    outlen -= nblocks * SHAKE256_RATE;
++
++    if (outlen) {
++        shake256_squeezeblocks(t, 1, &s);
++        for (size_t i = 0; i < outlen; ++i) {
++            output[i] = t[i];
++        }
++    }
++    shake256_ctx_release(&s);
++}
++
++void sha3_256_inc_init(sha3_256incctx *state) {
++    state->ctx = malloc(PQC_SHAKEINCCTX_BYTES);
++    if (state->ctx == NULL) {
++        exit(111);
++    }
++    keccak_inc_init(state->ctx);
++}
++
++void sha3_256_inc_ctx_clone(sha3_256incctx *dest, const sha3_256incctx *src) {
++    dest->ctx = malloc(PQC_SHAKEINCCTX_BYTES);
++    if (dest->ctx == NULL) {
++        exit(111);
++    }
++    memcpy(dest->ctx, src->ctx, PQC_SHAKEINCCTX_BYTES);
++}
++
++void sha3_256_inc_ctx_release(sha3_256incctx *state) {
++    free(state->ctx);
++}
++
++void sha3_256_inc_absorb(sha3_256incctx *state, const uint8_t *input, size_t inlen) {
++    keccak_inc_absorb(state->ctx, SHA3_256_RATE, input, inlen);
++}
++
++void sha3_256_inc_finalize(uint8_t *output, sha3_256incctx *state) {
++    uint8_t t[SHA3_256_RATE];
++    keccak_inc_finalize(state->ctx, SHA3_256_RATE, 0x06);
++
++    keccak_squeezeblocks(t, 1, state->ctx, SHA3_256_RATE);
++
++    sha3_256_inc_ctx_release(state);
++
++    for (size_t i = 0; i < 32; i++) {
++        output[i] = t[i];
++    }
++}
++
++/*************************************************
++ * Name:        sha3_256
++ *
++ * Description: SHA3-256 with non-incremental API
++ *
++ * Arguments:   - uint8_t *output:      pointer to output
++ *              - const uint8_t *input: pointer to input
++ *              - size_t inlen:   length of input in bytes
++ **************************************************/
++void sha3_256(uint8_t *output, const uint8_t *input, size_t inlen) {
++    uint64_t s[25];
++    uint8_t t[SHA3_256_RATE];
++
++    /* Absorb input */
++    keccak_absorb(s, SHA3_256_RATE, input, inlen, 0x06);
++
++    /* Squeeze output */
++    keccak_squeezeblocks(t, 1, s, SHA3_256_RATE);
++
++    for (size_t i = 0; i < 32; i++) {
++        output[i] = t[i];
++    }
++}
++
++void sha3_384_inc_init(sha3_384incctx *state) {
++    state->ctx = malloc(PQC_SHAKEINCCTX_BYTES);
++    if (state->ctx == NULL) {
++        exit(111);
++    }
++    keccak_inc_init(state->ctx);
++}
++
++void sha3_384_inc_ctx_clone(sha3_384incctx *dest, const sha3_384incctx *src) {
++    dest->ctx = malloc(PQC_SHAKEINCCTX_BYTES);
++    if (dest->ctx == NULL) {
++        exit(111);
++    }
++    memcpy(dest->ctx, src->ctx, PQC_SHAKEINCCTX_BYTES);
++}
++
++void sha3_384_inc_absorb(sha3_384incctx *state, const uint8_t *input, size_t inlen) {
++    keccak_inc_absorb(state->ctx, SHA3_384_RATE, input, inlen);
++}
++
++void sha3_384_inc_ctx_release(sha3_384incctx *state) {
++    free(state->ctx);
++}
++
++void sha3_384_inc_finalize(uint8_t *output, sha3_384incctx *state) {
++    uint8_t t[SHA3_384_RATE];
++    keccak_inc_finalize(state->ctx, SHA3_384_RATE, 0x06);
++
++    keccak_squeezeblocks(t, 1, state->ctx, SHA3_384_RATE);
++
++    sha3_384_inc_ctx_release(state);
++
++    for (size_t i = 0; i < 48; i++) {
++        output[i] = t[i];
++    }
++}
++
++/*************************************************
++ * Name:        sha3_384
++ *
++ * Description: SHA3-256 with non-incremental API
++ *
++ * Arguments:   - uint8_t *output:      pointer to output
++ *              - const uint8_t *input: pointer to input
++ *              - size_t inlen:   length of input in bytes
++ **************************************************/
++void sha3_384(uint8_t *output, const uint8_t *input, size_t inlen) {
++    uint64_t s[25];
++    uint8_t t[SHA3_384_RATE];
++
++    /* Absorb input */
++    keccak_absorb(s, SHA3_384_RATE, input, inlen, 0x06);
++
++    /* Squeeze output */
++    keccak_squeezeblocks(t, 1, s, SHA3_384_RATE);
++
++    for (size_t i = 0; i < 48; i++) {
++        output[i] = t[i];
++    }
++}
++
++void sha3_512_inc_init(sha3_512incctx *state) {
++    state->ctx = malloc(PQC_SHAKEINCCTX_BYTES);
++    if (state->ctx == NULL) {
++        exit(111);
++    }
++    keccak_inc_init(state->ctx);
++}
++
++void sha3_512_inc_ctx_clone(sha3_512incctx *dest, const sha3_512incctx *src) {
++    dest->ctx = malloc(PQC_SHAKEINCCTX_BYTES);
++    if (dest->ctx == NULL) {
++        exit(111);
++    }
++    memcpy(dest->ctx, src->ctx, PQC_SHAKEINCCTX_BYTES);
++}
++
++void sha3_512_inc_absorb(sha3_512incctx *state, const uint8_t *input, size_t inlen) {
++    keccak_inc_absorb(state->ctx, SHA3_512_RATE, input, inlen);
++}
++
++void sha3_512_inc_ctx_release(sha3_512incctx *state) {
++    free(state->ctx);
++}
++
++void sha3_512_inc_finalize(uint8_t *output, sha3_512incctx *state) {
++    uint8_t t[SHA3_512_RATE];
++    keccak_inc_finalize(state->ctx, SHA3_512_RATE, 0x06);
++
++    keccak_squeezeblocks(t, 1, state->ctx, SHA3_512_RATE);
++
++    sha3_512_inc_ctx_release(state);
++
++    for (size_t i = 0; i < 64; i++) {
++        output[i] = t[i];
++    }
++}
++
++/*************************************************
++ * Name:        sha3_512
++ *
++ * Description: SHA3-512 with non-incremental API
++ *
++ * Arguments:   - uint8_t *output:      pointer to output
++ *              - const uint8_t *input: pointer to input
++ *              - size_t inlen:   length of input in bytes
++ **************************************************/
++void sha3_512(uint8_t *output, const uint8_t *input, size_t inlen) {
++    uint64_t s[25];
++    uint8_t t[SHA3_512_RATE];
++
++    /* Absorb input */
++    keccak_absorb(s, SHA3_512_RATE, input, inlen, 0x06);
++
++    /* Squeeze output */
++    keccak_squeezeblocks(t, 1, s, SHA3_512_RATE);
++
++    for (size_t i = 0; i < 64; i++) {
++        output[i] = t[i];
++    }
++}
+diff --git a/lib/freebl/kyber512/fips202.h b/lib/freebl/kyber512/fips202.h
+new file mode 100644
+index 000000000..d3fda8119
+--- /dev/null
++++ b/lib/freebl/kyber512/fips202.h
+@@ -0,0 +1,167 @@
++#ifndef FIPS202_H
++#define FIPS202_H
++
++#include <stddef.h>
++#include <stdint.h>
++
++#define SHAKE128_RATE 168
++#define SHAKE256_RATE 136
++#define SHA3_256_RATE 136
++#define SHA3_384_RATE 104
++#define SHA3_512_RATE 72
++
++
++#define PQC_SHAKEINCCTX_BYTES (sizeof(uint64_t)*26)
++#define PQC_SHAKECTX_BYTES (sizeof(uint64_t)*25)
++
++// Context for incremental API
++typedef struct {
++    uint64_t* ctx;
++} shake128incctx;
++
++// Context for non-incremental API
++typedef struct {
++    uint64_t* ctx;
++} shake128ctx;
++
++// Context for incremental API
++typedef struct {
++    uint64_t* ctx;
++} shake256incctx;
++
++// Context for non-incremental API
++typedef struct {
++    uint64_t* ctx;
++} shake256ctx;
++
++// Context for incremental API
++typedef struct {
++    uint64_t* ctx;
++} sha3_256incctx;
++
++// Context for incremental API
++typedef struct {
++    uint64_t* ctx;
++} sha3_384incctx;
++
++// Context for incremental API
++typedef struct {
++    uint64_t* ctx;
++} sha3_512incctx;
++
++/* Initialize the state and absorb the provided input.
++ *
++ * This function does not support being called multiple times
++ * with the same state.
++ */
++void shake128_absorb(shake128ctx *state, const uint8_t *input, size_t inlen);
++/* Squeeze output out of the sponge.
++ *
++ * Supports being called multiple times
++ */
++void shake128_squeezeblocks(uint8_t *output, size_t nblocks, shake128ctx *state);
++/* Free the state */
++void shake128_ctx_release(shake128ctx *state);
++/* Copy the state. */
++void shake128_ctx_clone(shake128ctx *dest, const shake128ctx *src);
++
++/* Initialize incremental hashing API */
++void shake128_inc_init(shake128incctx *state);
++/* Absorb more information into the XOF.
++ *
++ * Can be called multiple times.
++ */
++void shake128_inc_absorb(shake128incctx *state, const uint8_t *input, size_t inlen);
++/* Finalize the XOF for squeezing */
++void shake128_inc_finalize(shake128incctx *state);
++/* Squeeze output out of the sponge.
++ *
++ * Supports being called multiple times
++ */
++void shake128_inc_squeeze(uint8_t *output, size_t outlen, shake128incctx *state);
++/* Copy the context of the SHAKE128 XOF */
++void shake128_inc_ctx_clone(shake128incctx* dest, const shake128incctx *src);
++/* Free the context of the SHAKE128 XOF */
++void shake128_inc_ctx_release(shake128incctx *state);
++
++/* Initialize the state and absorb the provided input.
++ *
++ * This function does not support being called multiple times
++ * with the same state.
++ */
++void shake256_absorb(shake256ctx *state, const uint8_t *input, size_t inlen);
++/* Squeeze output out of the sponge.
++ *
++ * Supports being called multiple times
++ */
++void shake256_squeezeblocks(uint8_t *output, size_t nblocks, shake256ctx *state);
++/* Free the context held by this XOF */
++void shake256_ctx_release(shake256ctx *state);
++/* Copy the context held by this XOF */
++void shake256_ctx_clone(shake256ctx *dest, const shake256ctx *src);
++
++/* Initialize incremental hashing API */
++void shake256_inc_init(shake256incctx *state);
++void shake256_inc_absorb(shake256incctx *state, const uint8_t *input, size_t inlen);
++/* Prepares for squeeze phase */
++void shake256_inc_finalize(shake256incctx *state);
++/* Squeeze output out of the sponge.
++ *
++ * Supports being called multiple times
++ */
++void shake256_inc_squeeze(uint8_t *output, size_t outlen, shake256incctx *state);
++/* Copy the state */
++void shake256_inc_ctx_clone(shake256incctx* dest, const shake256incctx *src);
++/* Free the state */
++void shake256_inc_ctx_release(shake256incctx *state);
++
++/* One-stop SHAKE128 call */
++void shake128(uint8_t *output, size_t outlen,
++              const uint8_t *input, size_t inlen);
++
++/* One-stop SHAKE256 call */
++void shake256(uint8_t *output, size_t outlen,
++              const uint8_t *input, size_t inlen);
++
++/* Initialize the incremental hashing state */
++void sha3_256_inc_init(sha3_256incctx *state);
++/* Absorb blocks into SHA3 */
++void sha3_256_inc_absorb(sha3_256incctx *state, const uint8_t *input, size_t inlen);
++/* Obtain the output of the function and free `state` */
++void sha3_256_inc_finalize(uint8_t *output, sha3_256incctx *state);
++/* Copy the context */
++void sha3_256_inc_ctx_clone(sha3_256incctx *dest, const sha3_256incctx *src);
++/* Release the state, don't use if `_finalize` has been used */
++void sha3_256_inc_ctx_release(sha3_256incctx *state);
++
++void sha3_256(uint8_t *output, const uint8_t *input, size_t inlen);
++
++/* Initialize the incremental hashing state */
++void sha3_384_inc_init(sha3_384incctx *state);
++/* Absorb blocks into SHA3 */
++void sha3_384_inc_absorb(sha3_384incctx *state, const uint8_t *input, size_t inlen);
++/* Obtain the output of the function and free `state` */
++void sha3_384_inc_finalize(uint8_t *output, sha3_384incctx *state);
++/* Copy the context */
++void sha3_384_inc_ctx_clone(sha3_384incctx *dest, const sha3_384incctx *src);
++/* Release the state, don't use if `_finalize` has been used */
++void sha3_384_inc_ctx_release(sha3_384incctx *state);
++
++/* One-stop SHA3-384 shop */
++void sha3_384(uint8_t *output, const uint8_t *input, size_t inlen);
++
++/* Initialize the incremental hashing state */
++void sha3_512_inc_init(sha3_512incctx *state);
++/* Absorb blocks into SHA3 */
++void sha3_512_inc_absorb(sha3_512incctx *state, const uint8_t *input, size_t inlen);
++/* Obtain the output of the function and free `state` */
++void sha3_512_inc_finalize(uint8_t *output, sha3_512incctx *state);
++/* Copy the context */
++void sha3_512_inc_ctx_clone(sha3_512incctx *dest, const sha3_512incctx *src);
++/* Release the state, don't use if `_finalize` has been used */
++void sha3_512_inc_ctx_release(sha3_512incctx *state);
++
++/* One-stop SHA3-512 shop */
++void sha3_512(uint8_t *output, const uint8_t *input, size_t inlen);
++
++#endif
+diff --git a/lib/freebl/kyber512/indcpa.c b/lib/freebl/kyber512/indcpa.c
+new file mode 100644
+index 000000000..e90dccd8a
+--- /dev/null
++++ b/lib/freebl/kyber512/indcpa.c
+@@ -0,0 +1,330 @@
++#include "indcpa.h"
++#include "ntt.h"
++#include "params.h"
++#include "poly.h"
++#include "polyvec.h"
++#include "randombytes.h"
++#include "symmetric.h"
++#include <stddef.h>
++#include <stdint.h>
++
++/*************************************************
++* Name:        pack_pk
++*
++* Description: Serialize the public key as concatenation of the
++*              serialized vector of polynomials pk
++*              and the public seed used to generate the matrix A.
++*
++* Arguments:   uint8_t *r: pointer to the output serialized public key
++*              polyvec *pk: pointer to the input public-key polyvec
++*              const uint8_t *seed: pointer to the input public seed
++**************************************************/
++static void pack_pk(uint8_t r[KYBER_INDCPA_PUBLICKEYBYTES],
++                    polyvec *pk,
++                    const uint8_t seed[KYBER_SYMBYTES]) {
++    size_t i;
++    PQCLEAN_KYBER512_CLEAN_polyvec_tobytes(r, pk);
++    for (i = 0; i < KYBER_SYMBYTES; i++) {
++        r[i + KYBER_POLYVECBYTES] = seed[i];
++    }
++}
++
++/*************************************************
++* Name:        unpack_pk
++*
++* Description: De-serialize public key from a byte array;
++*              approximate inverse of pack_pk
++*
++* Arguments:   - polyvec *pk: pointer to output public-key polynomial vector
++*              - uint8_t *seed: pointer to output seed to generate matrix A
++*              - const uint8_t *packedpk: pointer to input serialized public key
++**************************************************/
++static void unpack_pk(polyvec *pk,
++                      uint8_t seed[KYBER_SYMBYTES],
++                      const uint8_t packedpk[KYBER_INDCPA_PUBLICKEYBYTES]) {
++    size_t i;
++    PQCLEAN_KYBER512_CLEAN_polyvec_frombytes(pk, packedpk);
++    for (i = 0; i < KYBER_SYMBYTES; i++) {
++        seed[i] = packedpk[i + KYBER_POLYVECBYTES];
++    }
++}
++
++/*************************************************
++* Name:        pack_sk
++*
++* Description: Serialize the secret key
++*
++* Arguments:   - uint8_t *r: pointer to output serialized secret key
++*              - polyvec *sk: pointer to input vector of polynomials (secret key)
++**************************************************/
++static void pack_sk(uint8_t r[KYBER_INDCPA_SECRETKEYBYTES], polyvec *sk) {
++    PQCLEAN_KYBER512_CLEAN_polyvec_tobytes(r, sk);
++}
++
++/*************************************************
++* Name:        unpack_sk
++*
++* Description: De-serialize the secret key; inverse of pack_sk
++*
++* Arguments:   - polyvec *sk: pointer to output vector of polynomials (secret key)
++*              - const uint8_t *packedsk: pointer to input serialized secret key
++**************************************************/
++static void unpack_sk(polyvec *sk, const uint8_t packedsk[KYBER_INDCPA_SECRETKEYBYTES]) {
++    PQCLEAN_KYBER512_CLEAN_polyvec_frombytes(sk, packedsk);
++}
++
++/*************************************************
++* Name:        pack_ciphertext
++*
++* Description: Serialize the ciphertext as concatenation of the
++*              compressed and serialized vector of polynomials b
++*              and the compressed and serialized polynomial v
++*
++* Arguments:   uint8_t *r: pointer to the output serialized ciphertext
++*              poly *pk: pointer to the input vector of polynomials b
++*              poly *v: pointer to the input polynomial v
++**************************************************/
++static void pack_ciphertext(uint8_t r[KYBER_INDCPA_BYTES], polyvec *b, poly *v) {
++    PQCLEAN_KYBER512_CLEAN_polyvec_compress(r, b);
++    PQCLEAN_KYBER512_CLEAN_poly_compress(r + KYBER_POLYVECCOMPRESSEDBYTES, v);
++}
++
++/*************************************************
++* Name:        unpack_ciphertext
++*
++* Description: De-serialize and decompress ciphertext from a byte array;
++*              approximate inverse of pack_ciphertext
++*
++* Arguments:   - polyvec *b: pointer to the output vector of polynomials b
++*              - poly *v: pointer to the output polynomial v
++*              - const uint8_t *c: pointer to the input serialized ciphertext
++**************************************************/
++static void unpack_ciphertext(polyvec *b, poly *v, const uint8_t c[KYBER_INDCPA_BYTES]) {
++    PQCLEAN_KYBER512_CLEAN_polyvec_decompress(b, c);
++    PQCLEAN_KYBER512_CLEAN_poly_decompress(v, c + KYBER_POLYVECCOMPRESSEDBYTES);
++}
++
++/*************************************************
++* Name:        rej_uniform
++*
++* Description: Run rejection sampling on uniform random bytes to generate
++*              uniform random integers mod q
++*
++* Arguments:   - int16_t *r: pointer to output buffer
++*              - unsigned int len: requested number of 16-bit integers (uniform mod q)
++*              - const uint8_t *buf: pointer to input buffer (assumed to be uniformly random bytes)
++*              - unsigned int buflen: length of input buffer in bytes
++*
++* Returns number of sampled 16-bit integers (at most len)
++**************************************************/
++static unsigned int rej_uniform(int16_t *r,
++                                unsigned int len,
++                                const uint8_t *buf,
++                                unsigned int buflen) {
++    unsigned int ctr, pos;
++    uint16_t val0, val1;
++
++    ctr = pos = 0;
++    while (ctr < len && pos + 3 <= buflen) {
++        val0 = ((buf[pos + 0] >> 0) | ((uint16_t)buf[pos + 1] << 8)) & 0xFFF;
++        val1 = ((buf[pos + 1] >> 4) | ((uint16_t)buf[pos + 2] << 4)) & 0xFFF;
++        pos += 3;
++
++        if (val0 < KYBER_Q) {
++            r[ctr++] = val0;
++        }
++        if (ctr < len && val1 < KYBER_Q) {
++            r[ctr++] = val1;
++        }
++    }
++
++    return ctr;
++}
++
++#define gen_a(A,B)  PQCLEAN_KYBER512_CLEAN_gen_matrix(A,B,0)
++#define gen_at(A,B) PQCLEAN_KYBER512_CLEAN_gen_matrix(A,B,1)
++
++/*************************************************
++* Name:        PQCLEAN_KYBER512_CLEAN_gen_matrix
++*
++* Description: Deterministically generate matrix A (or the transpose of A)
++*              from a seed. Entries of the matrix are polynomials that look
++*              uniformly random. Performs rejection sampling on output of
++*              a XOF
++*
++* Arguments:   - polyvec *a: pointer to ouptput matrix A
++*              - const uint8_t *seed: pointer to input seed
++*              - int transposed: boolean deciding whether A or A^T is generated
++**************************************************/
++#define GEN_MATRIX_NBLOCKS ((12*KYBER_N/8*(1 << 12)/KYBER_Q + XOF_BLOCKBYTES)/XOF_BLOCKBYTES)
++// Not static for benchmarking
++void PQCLEAN_KYBER512_CLEAN_gen_matrix(polyvec *a, const uint8_t seed[KYBER_SYMBYTES], int transposed) {
++    unsigned int ctr, i, j, k;
++    unsigned int buflen, off;
++    uint8_t buf[GEN_MATRIX_NBLOCKS * XOF_BLOCKBYTES + 2];
++    xof_state state;
++
++    for (i = 0; i < KYBER_K; i++) {
++        for (j = 0; j < KYBER_K; j++) {
++            if (transposed) {
++                xof_absorb(&state, seed, (uint8_t)i, (uint8_t)j);
++            } else {
++                xof_absorb(&state, seed, (uint8_t)j, (uint8_t)i);
++            }
++
++            xof_squeezeblocks(buf, GEN_MATRIX_NBLOCKS, &state);
++            buflen = GEN_MATRIX_NBLOCKS * XOF_BLOCKBYTES;
++            ctr = rej_uniform(a[i].vec[j].coeffs, KYBER_N, buf, buflen);
++
++            while (ctr < KYBER_N) {
++                off = buflen % 3;
++                for (k = 0; k < off; k++) {
++                    buf[k] = buf[buflen - off + k];
++                }
++                xof_squeezeblocks(buf + off, 1, &state);
++                buflen = off + XOF_BLOCKBYTES;
++                ctr += rej_uniform(a[i].vec[j].coeffs + ctr, KYBER_N - ctr, buf, buflen);
++            }
++            xof_ctx_release(&state);
++        }
++    }
++}
++
++/*************************************************
++* Name:        PQCLEAN_KYBER512_CLEAN_indcpa_keypair
++*
++* Description: Generates public and private key for the CPA-secure
++*              public-key encryption scheme underlying Kyber
++*
++* Arguments:   - uint8_t *pk: pointer to output public key
++*                             (of length KYBER_INDCPA_PUBLICKEYBYTES bytes)
++*              - uint8_t *sk: pointer to output private key
++                              (of length KYBER_INDCPA_SECRETKEYBYTES bytes)
++**************************************************/
++void PQCLEAN_KYBER512_CLEAN_indcpa_keypair(uint8_t pk[KYBER_INDCPA_PUBLICKEYBYTES],
++        uint8_t sk[KYBER_INDCPA_SECRETKEYBYTES]) {
++    unsigned int i;
++    uint8_t buf[2 * KYBER_SYMBYTES];
++    const uint8_t *publicseed = buf;
++    const uint8_t *noiseseed = buf + KYBER_SYMBYTES;
++    uint8_t nonce = 0;
++    polyvec a[KYBER_K], e, pkpv, skpv;
++
++    randombytes(buf, KYBER_SYMBYTES);
++    hash_g(buf, buf, KYBER_SYMBYTES);
++
++    gen_a(a, publicseed);
++
++    for (i = 0; i < KYBER_K; i++) {
++        PQCLEAN_KYBER512_CLEAN_poly_getnoise_eta1(&skpv.vec[i], noiseseed, nonce++);
++    }
++    for (i = 0; i < KYBER_K; i++) {
++        PQCLEAN_KYBER512_CLEAN_poly_getnoise_eta1(&e.vec[i], noiseseed, nonce++);
++    }
++
++    PQCLEAN_KYBER512_CLEAN_polyvec_ntt(&skpv);
++    PQCLEAN_KYBER512_CLEAN_polyvec_ntt(&e);
++
++    // matrix-vector multiplication
++    for (i = 0; i < KYBER_K; i++) {
++        PQCLEAN_KYBER512_CLEAN_polyvec_basemul_acc_montgomery(&pkpv.vec[i], &a[i], &skpv);
++        PQCLEAN_KYBER512_CLEAN_poly_tomont(&pkpv.vec[i]);
++    }
++
++    PQCLEAN_KYBER512_CLEAN_polyvec_add(&pkpv, &pkpv, &e);
++    PQCLEAN_KYBER512_CLEAN_polyvec_reduce(&pkpv);
++
++    pack_sk(sk, &skpv);
++    pack_pk(pk, &pkpv, publicseed);
++}
++
++/*************************************************
++* Name:        PQCLEAN_KYBER512_CLEAN_indcpa_enc
++*
++* Description: Encryption function of the CPA-secure
++*              public-key encryption scheme underlying Kyber.
++*
++* Arguments:   - uint8_t *c: pointer to output ciphertext
++*                            (of length KYBER_INDCPA_BYTES bytes)
++*              - const uint8_t *m: pointer to input message
++*                                  (of length KYBER_INDCPA_MSGBYTES bytes)
++*              - const uint8_t *pk: pointer to input public key
++*                                   (of length KYBER_INDCPA_PUBLICKEYBYTES)
++*              - const uint8_t *coins: pointer to input random coins used as seed
++*                                      (of length KYBER_SYMBYTES) to deterministically
++*                                      generate all randomness
++**************************************************/
++void PQCLEAN_KYBER512_CLEAN_indcpa_enc(uint8_t c[KYBER_INDCPA_BYTES],
++                                       const uint8_t m[KYBER_INDCPA_MSGBYTES],
++                                       const uint8_t pk[KYBER_INDCPA_PUBLICKEYBYTES],
++                                       const uint8_t coins[KYBER_SYMBYTES]) {
++    unsigned int i;
++    uint8_t seed[KYBER_SYMBYTES];
++    uint8_t nonce = 0;
++    polyvec sp, pkpv, ep, at[KYBER_K], b;
++    poly v, k, epp;
++
++    unpack_pk(&pkpv, seed, pk);
++    PQCLEAN_KYBER512_CLEAN_poly_frommsg(&k, m);
++    gen_at(at, seed);
++
++    for (i = 0; i < KYBER_K; i++) {
++        PQCLEAN_KYBER512_CLEAN_poly_getnoise_eta1(sp.vec + i, coins, nonce++);
++    }
++    for (i = 0; i < KYBER_K; i++) {
++        PQCLEAN_KYBER512_CLEAN_poly_getnoise_eta2(ep.vec + i, coins, nonce++);
++    }
++    PQCLEAN_KYBER512_CLEAN_poly_getnoise_eta2(&epp, coins, nonce++);
++
++    PQCLEAN_KYBER512_CLEAN_polyvec_ntt(&sp);
++
++    // matrix-vector multiplication
++    for (i = 0; i < KYBER_K; i++) {
++        PQCLEAN_KYBER512_CLEAN_polyvec_basemul_acc_montgomery(&b.vec[i], &at[i], &sp);
++    }
++
++    PQCLEAN_KYBER512_CLEAN_polyvec_basemul_acc_montgomery(&v, &pkpv, &sp);
++
++    PQCLEAN_KYBER512_CLEAN_polyvec_invntt_tomont(&b);
++    PQCLEAN_KYBER512_CLEAN_poly_invntt_tomont(&v);
++
++    PQCLEAN_KYBER512_CLEAN_polyvec_add(&b, &b, &ep);
++    PQCLEAN_KYBER512_CLEAN_poly_add(&v, &v, &epp);
++    PQCLEAN_KYBER512_CLEAN_poly_add(&v, &v, &k);
++    PQCLEAN_KYBER512_CLEAN_polyvec_reduce(&b);
++    PQCLEAN_KYBER512_CLEAN_poly_reduce(&v);
++
++    pack_ciphertext(c, &b, &v);
++}
++
++/*************************************************
++* Name:        PQCLEAN_KYBER512_CLEAN_indcpa_dec
++*
++* Description: Decryption function of the CPA-secure
++*              public-key encryption scheme underlying Kyber.
++*
++* Arguments:   - uint8_t *m: pointer to output decrypted message
++*                            (of length KYBER_INDCPA_MSGBYTES)
++*              - const uint8_t *c: pointer to input ciphertext
++*                                  (of length KYBER_INDCPA_BYTES)
++*              - const uint8_t *sk: pointer to input secret key
++*                                   (of length KYBER_INDCPA_SECRETKEYBYTES)
++**************************************************/
++void PQCLEAN_KYBER512_CLEAN_indcpa_dec(uint8_t m[KYBER_INDCPA_MSGBYTES],
++                                       const uint8_t c[KYBER_INDCPA_BYTES],
++                                       const uint8_t sk[KYBER_INDCPA_SECRETKEYBYTES]) {
++    polyvec b, skpv;
++    poly v, mp;
++
++    unpack_ciphertext(&b, &v, c);
++    unpack_sk(&skpv, sk);
++
++    PQCLEAN_KYBER512_CLEAN_polyvec_ntt(&b);
++    PQCLEAN_KYBER512_CLEAN_polyvec_basemul_acc_montgomery(&mp, &skpv, &b);
++    PQCLEAN_KYBER512_CLEAN_poly_invntt_tomont(&mp);
++
++    PQCLEAN_KYBER512_CLEAN_poly_sub(&mp, &v, &mp);
++    PQCLEAN_KYBER512_CLEAN_poly_reduce(&mp);
++
++    PQCLEAN_KYBER512_CLEAN_poly_tomsg(m, &mp);
++}
+diff --git a/lib/freebl/kyber512/indcpa.h b/lib/freebl/kyber512/indcpa.h
+new file mode 100644
+index 000000000..84464a931
+--- /dev/null
++++ b/lib/freebl/kyber512/indcpa.h
+@@ -0,0 +1,20 @@
++#ifndef PQCLEAN_KYBER512_CLEAN_INDCPA_H
++#define PQCLEAN_KYBER512_CLEAN_INDCPA_H
++#include "params.h"
++#include "polyvec.h"
++#include <stdint.h>
++
++void PQCLEAN_KYBER512_CLEAN_gen_matrix(polyvec *a, const uint8_t seed[KYBER_SYMBYTES], int transposed);
++void PQCLEAN_KYBER512_CLEAN_indcpa_keypair(uint8_t pk[KYBER_INDCPA_PUBLICKEYBYTES],
++        uint8_t sk[KYBER_INDCPA_SECRETKEYBYTES]);
++
++void PQCLEAN_KYBER512_CLEAN_indcpa_enc(uint8_t c[KYBER_INDCPA_BYTES],
++                                       const uint8_t m[KYBER_INDCPA_MSGBYTES],
++                                       const uint8_t pk[KYBER_INDCPA_PUBLICKEYBYTES],
++                                       const uint8_t coins[KYBER_SYMBYTES]);
++
++void PQCLEAN_KYBER512_CLEAN_indcpa_dec(uint8_t m[KYBER_INDCPA_MSGBYTES],
++                                       const uint8_t c[KYBER_INDCPA_BYTES],
++                                       const uint8_t sk[KYBER_INDCPA_SECRETKEYBYTES]);
++
++#endif
+diff --git a/lib/freebl/kyber512/kem.c b/lib/freebl/kyber512/kem.c
+new file mode 100644
+index 000000000..510c78886
+--- /dev/null
++++ b/lib/freebl/kyber512/kem.c
+@@ -0,0 +1,126 @@
++#include "indcpa.h"
++#include "kem.h"
++#include "params.h"
++#include "randombytes.h"
++#include "symmetric.h"
++#include "verify.h"
++#include <stddef.h>
++#include <stdint.h>
++
++/*************************************************
++* Name:        PQCLEAN_KYBER512_CLEAN_crypto_kem_keypair
++*
++* Description: Generates public and private key
++*              for CCA-secure Kyber key encapsulation mechanism
++*
++* Arguments:   - uint8_t *pk: pointer to output public key
++*                (an already allocated array of KYBER_PUBLICKEYBYTES bytes)
++*              - uint8_t *sk: pointer to output private key
++*                (an already allocated array of KYBER_SECRETKEYBYTES bytes)
++*
++* Returns 0 (success)
++**************************************************/
++int PQCLEAN_KYBER512_CLEAN_crypto_kem_keypair(uint8_t *pk,
++        uint8_t *sk) {
++    size_t i;
++    PQCLEAN_KYBER512_CLEAN_indcpa_keypair(pk, sk);
++    for (i = 0; i < KYBER_INDCPA_PUBLICKEYBYTES; i++) {
++        sk[i + KYBER_INDCPA_SECRETKEYBYTES] = pk[i];
++    }
++    hash_h(sk + KYBER_SECRETKEYBYTES - 2 * KYBER_SYMBYTES, pk, KYBER_PUBLICKEYBYTES);
++    /* Value z for pseudo-random output on reject */
++    randombytes(sk + KYBER_SECRETKEYBYTES - KYBER_SYMBYTES, KYBER_SYMBYTES);
++    return 0;
++}
++
++/*************************************************
++* Name:        PQCLEAN_KYBER512_CLEAN_crypto_kem_enc
++*
++* Description: Generates cipher text and shared
++*              secret for given public key
++*
++* Arguments:   - uint8_t *ct: pointer to output cipher text
++*                (an already allocated array of KYBER_CIPHERTEXTBYTES bytes)
++*              - uint8_t *ss: pointer to output shared secret
++*                (an already allocated array of KYBER_SSBYTES bytes)
++*              - const uint8_t *pk: pointer to input public key
++*                (an already allocated array of KYBER_PUBLICKEYBYTES bytes)
++*
++* Returns 0 (success)
++**************************************************/
++int PQCLEAN_KYBER512_CLEAN_crypto_kem_enc(uint8_t *ct,
++        uint8_t *ss,
++        const uint8_t *pk) {
++    uint8_t buf[2 * KYBER_SYMBYTES];
++    /* Will contain key, coins */
++    uint8_t kr[2 * KYBER_SYMBYTES];
++
++    randombytes(buf, KYBER_SYMBYTES);
++    /* Don't release system RNG output */
++    hash_h(buf, buf, KYBER_SYMBYTES);
++
++    /* Multitarget countermeasure for coins + contributory KEM */
++    hash_h(buf + KYBER_SYMBYTES, pk, KYBER_PUBLICKEYBYTES);
++    hash_g(kr, buf, 2 * KYBER_SYMBYTES);
++
++    /* coins are in kr+KYBER_SYMBYTES */
++    PQCLEAN_KYBER512_CLEAN_indcpa_enc(ct, buf, pk, kr + KYBER_SYMBYTES);
++
++    /* overwrite coins in kr with H(c) */
++    hash_h(kr + KYBER_SYMBYTES, ct, KYBER_CIPHERTEXTBYTES);
++    /* hash concatenation of pre-k and H(c) to k */
++    kdf(ss, kr, 2 * KYBER_SYMBYTES);
++    return 0;
++}
++
++/*************************************************
++* Name:        PQCLEAN_KYBER512_CLEAN_crypto_kem_dec
++*
++* Description: Generates shared secret for given
++*              cipher text and private key
++*
++* Arguments:   - uint8_t *ss: pointer to output shared secret
++*                (an already allocated array of KYBER_SSBYTES bytes)
++*              - const uint8_t *ct: pointer to input cipher text
++*                (an already allocated array of KYBER_CIPHERTEXTBYTES bytes)
++*              - const uint8_t *sk: pointer to input private key
++*                (an already allocated array of KYBER_SECRETKEYBYTES bytes)
++*
++* Returns 0.
++*
++* On failure, ss will contain a pseudo-random value.
++**************************************************/
++int PQCLEAN_KYBER512_CLEAN_crypto_kem_dec(uint8_t *ss,
++        const uint8_t *ct,
++        const uint8_t *sk) {
++    size_t i;
++    int fail;
++    uint8_t buf[2 * KYBER_SYMBYTES];
++    /* Will contain key, coins */
++    uint8_t kr[2 * KYBER_SYMBYTES];
++    uint8_t cmp[KYBER_CIPHERTEXTBYTES];
++    const uint8_t *pk = sk + KYBER_INDCPA_SECRETKEYBYTES;
++
++    PQCLEAN_KYBER512_CLEAN_indcpa_dec(buf, ct, sk);
++
++    /* Multitarget countermeasure for coins + contributory KEM */
++    for (i = 0; i < KYBER_SYMBYTES; i++) {
++        buf[KYBER_SYMBYTES + i] = sk[KYBER_SECRETKEYBYTES - 2 * KYBER_SYMBYTES + i];
++    }
++    hash_g(kr, buf, 2 * KYBER_SYMBYTES);
++
++    /* coins are in kr+KYBER_SYMBYTES */
++    PQCLEAN_KYBER512_CLEAN_indcpa_enc(cmp, buf, pk, kr + KYBER_SYMBYTES);
++
++    fail = PQCLEAN_KYBER512_CLEAN_verify(ct, cmp, KYBER_CIPHERTEXTBYTES);
++
++    /* overwrite coins in kr with H(c) */
++    hash_h(kr + KYBER_SYMBYTES, ct, KYBER_CIPHERTEXTBYTES);
++
++    /* Overwrite pre-k with z on re-encryption failure */
++    PQCLEAN_KYBER512_CLEAN_cmov(kr, sk + KYBER_SECRETKEYBYTES - KYBER_SYMBYTES, KYBER_SYMBYTES, (uint8_t)fail);
++
++    /* hash concatenation of pre-k and H(c) to k */
++    kdf(ss, kr, 2 * KYBER_SYMBYTES);
++    return 0;
++}
+diff --git a/lib/freebl/kyber512/kem.h b/lib/freebl/kyber512/kem.h
+new file mode 100644
+index 000000000..722209b5b
+--- /dev/null
++++ b/lib/freebl/kyber512/kem.h
+@@ -0,0 +1,19 @@
++#ifndef PQCLEAN_KYBER512_CLEAN_KEM_H
++#define PQCLEAN_KYBER512_CLEAN_KEM_H
++#include "params.h"
++#include <stdint.h>
++
++#define PQCLEAN_KYBER512_CLEAN_CRYPTO_SECRETKEYBYTES  KYBER_SECRETKEYBYTES
++#define PQCLEAN_KYBER512_CLEAN_CRYPTO_PUBLICKEYBYTES  KYBER_PUBLICKEYBYTES
++#define PQCLEAN_KYBER512_CLEAN_CRYPTO_CIPHERTEXTBYTES KYBER_CIPHERTEXTBYTES
++#define PQCLEAN_KYBER512_CLEAN_CRYPTO_BYTES           KYBER_SSBYTES
++
++#define PQCLEAN_KYBER512_CLEAN_CRYPTO_ALGNAME "Kyber512"
++
++int PQCLEAN_KYBER512_CLEAN_crypto_kem_keypair(uint8_t *pk, uint8_t *sk);
++
++int PQCLEAN_KYBER512_CLEAN_crypto_kem_enc(uint8_t *ct, uint8_t *ss, const uint8_t *pk);
++
++int PQCLEAN_KYBER512_CLEAN_crypto_kem_dec(uint8_t *ss, const uint8_t *ct, const uint8_t *sk);
++
++#endif
+diff --git a/lib/freebl/kyber512/ntt.c b/lib/freebl/kyber512/ntt.c
+new file mode 100644
+index 000000000..e284a8c52
+--- /dev/null
++++ b/lib/freebl/kyber512/ntt.c
+@@ -0,0 +1,146 @@
++#include "ntt.h"
++#include "params.h"
++#include "reduce.h"
++#include <stdint.h>
++
++/* Code to generate PQCLEAN_KYBER512_CLEAN_zetas and zetas_inv used in the number-theoretic transform:
++
++#define KYBER_ROOT_OF_UNITY 17
++
++static const uint8_t tree[128] = {
++  0, 64, 32, 96, 16, 80, 48, 112, 8, 72, 40, 104, 24, 88, 56, 120,
++  4, 68, 36, 100, 20, 84, 52, 116, 12, 76, 44, 108, 28, 92, 60, 124,
++  2, 66, 34, 98, 18, 82, 50, 114, 10, 74, 42, 106, 26, 90, 58, 122,
++  6, 70, 38, 102, 22, 86, 54, 118, 14, 78, 46, 110, 30, 94, 62, 126,
++  1, 65, 33, 97, 17, 81, 49, 113, 9, 73, 41, 105, 25, 89, 57, 121,
++  5, 69, 37, 101, 21, 85, 53, 117, 13, 77, 45, 109, 29, 93, 61, 125,
++  3, 67, 35, 99, 19, 83, 51, 115, 11, 75, 43, 107, 27, 91, 59, 123,
++  7, 71, 39, 103, 23, 87, 55, 119, 15, 79, 47, 111, 31, 95, 63, 127
++};
++
++void init_ntt() {
++  unsigned int i;
++  int16_t tmp[128];
++
++  tmp[0] = MONT;
++  for(i=1;i<128;i++)
++    tmp[i] = fqmul(tmp[i-1],MONT*KYBER_ROOT_OF_UNITY % KYBER_Q);
++
++  for(i=0;i<128;i++) {
++    PQCLEAN_KYBER512_CLEAN_zetas[i] = tmp[tree[i]];
++    if(PQCLEAN_KYBER512_CLEAN_zetas[i] > KYBER_Q/2)
++      PQCLEAN_KYBER512_CLEAN_zetas[i] -= KYBER_Q;
++    if(PQCLEAN_KYBER512_CLEAN_zetas[i] < -KYBER_Q/2)
++      PQCLEAN_KYBER512_CLEAN_zetas[i] += KYBER_Q;
++  }
++}
++*/
++
++const int16_t PQCLEAN_KYBER512_CLEAN_zetas[128] = {
++    -1044,  -758,  -359, -1517,  1493,  1422,   287,   202,
++        -171,   622,  1577,   182,   962, -1202, -1474,  1468,
++        573, -1325,   264,   383,  -829,  1458, -1602,  -130,
++        -681,  1017,   732,   608, -1542,   411,  -205, -1571,
++        1223,   652,  -552,  1015, -1293,  1491,  -282, -1544,
++        516,    -8,  -320,  -666, -1618, -1162,   126,  1469,
++        -853,   -90,  -271,   830,   107, -1421,  -247,  -951,
++        -398,   961, -1508,  -725,   448, -1065,   677, -1275,
++        -1103,   430,   555,   843, -1251,   871,  1550,   105,
++        422,   587,   177,  -235,  -291,  -460,  1574,  1653,
++        -246,   778,  1159,  -147,  -777,  1483,  -602,  1119,
++        -1590,   644,  -872,   349,   418,   329,  -156,   -75,
++        817,  1097,   603,   610,  1322, -1285, -1465,   384,
++        -1215,  -136,  1218, -1335,  -874,   220, -1187, -1659,
++        -1185, -1530, -1278,   794, -1510,  -854,  -870,   478,
++        -108,  -308,   996,   991,   958, -1460,  1522,  1628
++    };
++
++/*************************************************
++* Name:        fqmul
++*
++* Description: Multiplication followed by Montgomery reduction
++*
++* Arguments:   - int16_t a: first factor
++*              - int16_t b: second factor
++*
++* Returns 16-bit integer congruent to a*b*R^{-1} mod q
++**************************************************/
++static int16_t fqmul(int16_t a, int16_t b) {
++    return PQCLEAN_KYBER512_CLEAN_montgomery_reduce((int32_t)a * b);
++}
++
++/*************************************************
++* Name:        PQCLEAN_KYBER512_CLEAN_ntt
++*
++* Description: Inplace number-theoretic transform (NTT) in Rq.
++*              input is in standard order, output is in bitreversed order
++*
++* Arguments:   - int16_t r[256]: pointer to input/output vector of elements of Zq
++**************************************************/
++void PQCLEAN_KYBER512_CLEAN_ntt(int16_t r[256]) {
++    unsigned int len, start, j, k;
++    int16_t t, zeta;
++
++    k = 1;
++    for (len = 128; len >= 2; len >>= 1) {
++        for (start = 0; start < 256; start = j + len) {
++            zeta = PQCLEAN_KYBER512_CLEAN_zetas[k++];
++            for (j = start; j < start + len; j++) {
++                t = fqmul(zeta, r[j + len]);
++                r[j + len] = r[j] - t;
++                r[j] = r[j] + t;
++            }
++        }
++    }
++}
++
++/*************************************************
++* Name:        invntt_tomont
++*
++* Description: Inplace inverse number-theoretic transform in Rq and
++*              multiplication by Montgomery factor 2^16.
++*              Input is in bitreversed order, output is in standard order
++*
++* Arguments:   - int16_t r[256]: pointer to input/output vector of elements of Zq
++**************************************************/
++void PQCLEAN_KYBER512_CLEAN_invntt(int16_t r[256]) {
++    unsigned int start, len, j, k;
++    int16_t t, zeta;
++    const int16_t f = 1441; // mont^2/128
++
++    k = 127;
++    for (len = 2; len <= 128; len <<= 1) {
++        for (start = 0; start < 256; start = j + len) {
++            zeta = PQCLEAN_KYBER512_CLEAN_zetas[k--];
++            for (j = start; j < start + len; j++) {
++                t = r[j];
++                r[j] = PQCLEAN_KYBER512_CLEAN_barrett_reduce(t + r[j + len]);
++                r[j + len] = r[j + len] - t;
++                r[j + len] = fqmul(zeta, r[j + len]);
++            }
++        }
++    }
++
++    for (j = 0; j < 256; j++) {
++        r[j] = fqmul(r[j], f);
++    }
++}
++
++/*************************************************
++* Name:        PQCLEAN_KYBER512_CLEAN_basemul
++*
++* Description: Multiplication of polynomials in Zq[X]/(X^2-zeta)
++*              used for multiplication of elements in Rq in NTT domain
++*
++* Arguments:   - int16_t r[2]: pointer to the output polynomial
++*              - const int16_t a[2]: pointer to the first factor
++*              - const int16_t b[2]: pointer to the second factor
++*              - int16_t zeta: integer defining the reduction polynomial
++**************************************************/
++void PQCLEAN_KYBER512_CLEAN_basemul(int16_t r[2], const int16_t a[2], const int16_t b[2], int16_t zeta) {
++    r[0]  = fqmul(a[1], b[1]);
++    r[0]  = fqmul(r[0], zeta);
++    r[0] += fqmul(a[0], b[0]);
++    r[1]  = fqmul(a[0], b[1]);
++    r[1] += fqmul(a[1], b[0]);
++}
+diff --git a/lib/freebl/kyber512/ntt.h b/lib/freebl/kyber512/ntt.h
+new file mode 100644
+index 000000000..d25bc40c0
+--- /dev/null
++++ b/lib/freebl/kyber512/ntt.h
+@@ -0,0 +1,14 @@
++#ifndef PQCLEAN_KYBER512_CLEAN_NTT_H
++#define PQCLEAN_KYBER512_CLEAN_NTT_H
++#include "params.h"
++#include <stdint.h>
++
++extern const int16_t PQCLEAN_KYBER512_CLEAN_zetas[128];
++
++void PQCLEAN_KYBER512_CLEAN_ntt(int16_t r[256]);
++
++void PQCLEAN_KYBER512_CLEAN_invntt(int16_t r[256]);
++
++void PQCLEAN_KYBER512_CLEAN_basemul(int16_t r[2], const int16_t a[2], const int16_t b[2], int16_t zeta);
++
++#endif
+diff --git a/lib/freebl/kyber512/params.h b/lib/freebl/kyber512/params.h
+new file mode 100644
+index 000000000..f2c7efc78
+--- /dev/null
++++ b/lib/freebl/kyber512/params.h
+@@ -0,0 +1,33 @@
++#ifndef PQCLEAN_KYBER512_CLEAN_PARAMS_H
++#define PQCLEAN_KYBER512_CLEAN_PARAMS_H
++
++
++
++
++#define KYBER_N 256
++#define KYBER_Q 3329
++
++#define KYBER_SYMBYTES 32   /* size in bytes of hashes, and seeds */
++#define KYBER_SSBYTES  32   /* size in bytes of shared key */
++
++#define KYBER_POLYBYTES     384
++#define KYBER_POLYVECBYTES  (KYBER_K * KYBER_POLYBYTES)
++
++#define KYBER_K 2
++#define KYBER_ETA1 3
++#define KYBER_POLYCOMPRESSEDBYTES    128
++#define KYBER_POLYVECCOMPRESSEDBYTES (KYBER_K * 320)
++
++#define KYBER_ETA2 2
++
++#define KYBER_INDCPA_MSGBYTES       (KYBER_SYMBYTES)
++#define KYBER_INDCPA_PUBLICKEYBYTES (KYBER_POLYVECBYTES + KYBER_SYMBYTES)
++#define KYBER_INDCPA_SECRETKEYBYTES (KYBER_POLYVECBYTES)
++#define KYBER_INDCPA_BYTES          (KYBER_POLYVECCOMPRESSEDBYTES + KYBER_POLYCOMPRESSEDBYTES)
++
++#define KYBER_PUBLICKEYBYTES  (KYBER_INDCPA_PUBLICKEYBYTES)
++/* 32 bytes of additional space to save H(pk) */
++#define KYBER_SECRETKEYBYTES  (KYBER_INDCPA_SECRETKEYBYTES + KYBER_INDCPA_PUBLICKEYBYTES + 2*KYBER_SYMBYTES)
++#define KYBER_CIPHERTEXTBYTES (KYBER_INDCPA_BYTES)
++
++#endif
+diff --git a/lib/freebl/kyber512/poly.c b/lib/freebl/kyber512/poly.c
+new file mode 100644
+index 000000000..f10afd7db
+--- /dev/null
++++ b/lib/freebl/kyber512/poly.c
+@@ -0,0 +1,287 @@
++#include "cbd.h"
++#include "ntt.h"
++#include "params.h"
++#include "poly.h"
++#include "reduce.h"
++#include "symmetric.h"
++#include <stdint.h>
++
++/*************************************************
++* Name:        PQCLEAN_KYBER512_CLEAN_poly_compress
++*
++* Description: Compression and subsequent serialization of a polynomial
++*
++* Arguments:   - uint8_t *r: pointer to output byte array
++*                            (of length KYBER_POLYCOMPRESSEDBYTES)
++*              - const poly *a: pointer to input polynomial
++**************************************************/
++void PQCLEAN_KYBER512_CLEAN_poly_compress(uint8_t r[KYBER_POLYCOMPRESSEDBYTES], const poly *a) {
++    size_t i, j;
++    int16_t u;
++    uint8_t t[8];
++
++    for (i = 0; i < KYBER_N / 8; i++) {
++        for (j = 0; j < 8; j++) {
++            // map to positive standard representatives
++            u  = a->coeffs[8 * i + j];
++            u += (u >> 15) & KYBER_Q;
++            t[j] = ((((uint16_t)u << 4) + KYBER_Q / 2) / KYBER_Q) & 15;
++        }
++
++        r[0] = t[0] | (t[1] << 4);
++        r[1] = t[2] | (t[3] << 4);
++        r[2] = t[4] | (t[5] << 4);
++        r[3] = t[6] | (t[7] << 4);
++        r += 4;
++    }
++}
++
++/*************************************************
++* Name:        PQCLEAN_KYBER512_CLEAN_poly_decompress
++*
++* Description: De-serialization and subsequent decompression of a polynomial;
++*              approximate inverse of PQCLEAN_KYBER512_CLEAN_poly_compress
++*
++* Arguments:   - poly *r: pointer to output polynomial
++*              - const uint8_t *a: pointer to input byte array
++*                                  (of length KYBER_POLYCOMPRESSEDBYTES bytes)
++**************************************************/
++void PQCLEAN_KYBER512_CLEAN_poly_decompress(poly *r, const uint8_t a[KYBER_POLYCOMPRESSEDBYTES]) {
++    size_t i;
++
++    for (i = 0; i < KYBER_N / 2; i++) {
++        r->coeffs[2 * i + 0] = (((uint16_t)(a[0] & 15) * KYBER_Q) + 8) >> 4;
++        r->coeffs[2 * i + 1] = (((uint16_t)(a[0] >> 4) * KYBER_Q) + 8) >> 4;
++        a += 1;
++    }
++}
++
++/*************************************************
++* Name:        PQCLEAN_KYBER512_CLEAN_poly_tobytes
++*
++* Description: Serialization of a polynomial
++*
++* Arguments:   - uint8_t *r: pointer to output byte array
++*                            (needs space for KYBER_POLYBYTES bytes)
++*              - const poly *a: pointer to input polynomial
++**************************************************/
++void PQCLEAN_KYBER512_CLEAN_poly_tobytes(uint8_t r[KYBER_POLYBYTES], const poly *a) {
++    size_t i;
++    uint16_t t0, t1;
++
++    for (i = 0; i < KYBER_N / 2; i++) {
++        // map to positive standard representatives
++        t0  = a->coeffs[2 * i];
++        t0 += ((int16_t)t0 >> 15) & KYBER_Q;
++        t1 = a->coeffs[2 * i + 1];
++        t1 += ((int16_t)t1 >> 15) & KYBER_Q;
++        r[3 * i + 0] = (uint8_t)(t0 >> 0);
++        r[3 * i + 1] = (uint8_t)((t0 >> 8) | (t1 << 4));
++        r[3 * i + 2] = (uint8_t)(t1 >> 4);
++    }
++}
++
++/*************************************************
++* Name:        PQCLEAN_KYBER512_CLEAN_poly_frombytes
++*
++* Description: De-serialization of a polynomial;
++*              inverse of PQCLEAN_KYBER512_CLEAN_poly_tobytes
++*
++* Arguments:   - poly *r: pointer to output polynomial
++*              - const uint8_t *a: pointer to input byte array
++*                                  (of KYBER_POLYBYTES bytes)
++**************************************************/
++void PQCLEAN_KYBER512_CLEAN_poly_frombytes(poly *r, const uint8_t a[KYBER_POLYBYTES]) {
++    size_t i;
++    for (i = 0; i < KYBER_N / 2; i++) {
++        r->coeffs[2 * i]   = ((a[3 * i + 0] >> 0) | ((uint16_t)a[3 * i + 1] << 8)) & 0xFFF;
++        r->coeffs[2 * i + 1] = ((a[3 * i + 1] >> 4) | ((uint16_t)a[3 * i + 2] << 4)) & 0xFFF;
++    }
++}
++
++/*************************************************
++* Name:        PQCLEAN_KYBER512_CLEAN_poly_frommsg
++*
++* Description: Convert 32-byte message to polynomial
++*
++* Arguments:   - poly *r: pointer to output polynomial
++*              - const uint8_t *msg: pointer to input message
++**************************************************/
++void PQCLEAN_KYBER512_CLEAN_poly_frommsg(poly *r, const uint8_t msg[KYBER_INDCPA_MSGBYTES]) {
++    size_t i, j;
++    int16_t mask;
++
++    for (i = 0; i < KYBER_N / 8; i++) {
++        for (j = 0; j < 8; j++) {
++            mask = -(int16_t)((msg[i] >> j) & 1);
++            r->coeffs[8 * i + j] = mask & ((KYBER_Q + 1) / 2);
++        }
++    }
++}
++
++/*************************************************
++* Name:        PQCLEAN_KYBER512_CLEAN_poly_tomsg
++*
++* Description: Convert polynomial to 32-byte message
++*
++* Arguments:   - uint8_t *msg: pointer to output message
++*              - const poly *a: pointer to input polynomial
++**************************************************/
++void PQCLEAN_KYBER512_CLEAN_poly_tomsg(uint8_t msg[KYBER_INDCPA_MSGBYTES], const poly *a) {
++    size_t i, j;
++    uint16_t t;
++
++    for (i = 0; i < KYBER_N / 8; i++) {
++        msg[i] = 0;
++        for (j = 0; j < 8; j++) {
++            t  = a->coeffs[8 * i + j];
++            t += ((int16_t)t >> 15) & KYBER_Q;
++            t  = (((t << 1) + KYBER_Q / 2) / KYBER_Q) & 1;
++            msg[i] |= t << j;
++        }
++    }
++}
++
++/*************************************************
++* Name:        PQCLEAN_KYBER512_CLEAN_poly_getnoise_eta1
++*
++* Description: Sample a polynomial deterministically from a seed and a nonce,
++*              with output polynomial close to centered binomial distribution
++*              with parameter KYBER_ETA1
++*
++* Arguments:   - poly *r: pointer to output polynomial
++*              - const uint8_t *seed: pointer to input seed
++*                                     (of length KYBER_SYMBYTES bytes)
++*              - uint8_t nonce: one-byte input nonce
++**************************************************/
++void PQCLEAN_KYBER512_CLEAN_poly_getnoise_eta1(poly *r, const uint8_t seed[KYBER_SYMBYTES], uint8_t nonce) {
++    uint8_t buf[KYBER_ETA1 * KYBER_N / 4];
++    prf(buf, sizeof(buf), seed, nonce);
++    PQCLEAN_KYBER512_CLEAN_poly_cbd_eta1(r, buf);
++}
++
++/*************************************************
++* Name:        PQCLEAN_KYBER512_CLEAN_poly_getnoise_eta2
++*
++* Description: Sample a polynomial deterministically from a seed and a nonce,
++*              with output polynomial close to centered binomial distribution
++*              with parameter KYBER_ETA2
++*
++* Arguments:   - poly *r: pointer to output polynomial
++*              - const uint8_t *seed: pointer to input seed
++*                                     (of length KYBER_SYMBYTES bytes)
++*              - uint8_t nonce: one-byte input nonce
++**************************************************/
++void PQCLEAN_KYBER512_CLEAN_poly_getnoise_eta2(poly *r, const uint8_t seed[KYBER_SYMBYTES], uint8_t nonce) {
++    uint8_t buf[KYBER_ETA2 * KYBER_N / 4];
++    prf(buf, sizeof(buf), seed, nonce);
++    PQCLEAN_KYBER512_CLEAN_poly_cbd_eta2(r, buf);
++}
++
++
++/*************************************************
++* Name:        PQCLEAN_KYBER512_CLEAN_poly_ntt
++*
++* Description: Computes negacyclic number-theoretic transform (NTT) of
++*              a polynomial in place;
++*              inputs assumed to be in normal order, output in bitreversed order
++*
++* Arguments:   - uint16_t *r: pointer to in/output polynomial
++**************************************************/
++void PQCLEAN_KYBER512_CLEAN_poly_ntt(poly *r) {
++    PQCLEAN_KYBER512_CLEAN_ntt(r->coeffs);
++    PQCLEAN_KYBER512_CLEAN_poly_reduce(r);
++}
++
++/*************************************************
++* Name:        PQCLEAN_KYBER512_CLEAN_poly_invntt_tomont
++*
++* Description: Computes inverse of negacyclic number-theoretic transform (NTT)
++*              of a polynomial in place;
++*              inputs assumed to be in bitreversed order, output in normal order
++*
++* Arguments:   - uint16_t *a: pointer to in/output polynomial
++**************************************************/
++void PQCLEAN_KYBER512_CLEAN_poly_invntt_tomont(poly *r) {
++    PQCLEAN_KYBER512_CLEAN_invntt(r->coeffs);
++}
++
++/*************************************************
++* Name:        PQCLEAN_KYBER512_CLEAN_poly_basemul_montgomery
++*
++* Description: Multiplication of two polynomials in NTT domain
++*
++* Arguments:   - poly *r: pointer to output polynomial
++*              - const poly *a: pointer to first input polynomial
++*              - const poly *b: pointer to second input polynomial
++**************************************************/
++void PQCLEAN_KYBER512_CLEAN_poly_basemul_montgomery(poly *r, const poly *a, const poly *b) {
++    size_t i;
++    for (i = 0; i < KYBER_N / 4; i++) {
++        PQCLEAN_KYBER512_CLEAN_basemul(&r->coeffs[4 * i], &a->coeffs[4 * i], &b->coeffs[4 * i], PQCLEAN_KYBER512_CLEAN_zetas[64 + i]);
++        PQCLEAN_KYBER512_CLEAN_basemul(&r->coeffs[4 * i + 2], &a->coeffs[4 * i + 2], &b->coeffs[4 * i + 2], -PQCLEAN_KYBER512_CLEAN_zetas[64 + i]);
++    }
++}
++
++/*************************************************
++* Name:        PQCLEAN_KYBER512_CLEAN_poly_tomont
++*
++* Description: Inplace conversion of all coefficients of a polynomial
++*              from normal domain to Montgomery domain
++*
++* Arguments:   - poly *r: pointer to input/output polynomial
++**************************************************/
++void PQCLEAN_KYBER512_CLEAN_poly_tomont(poly *r) {
++    size_t i;
++    const int16_t f = (1ULL << 32) % KYBER_Q;
++    for (i = 0; i < KYBER_N; i++) {
++        r->coeffs[i] = PQCLEAN_KYBER512_CLEAN_montgomery_reduce((int32_t)r->coeffs[i] * f);
++    }
++}
++
++/*************************************************
++* Name:        PQCLEAN_KYBER512_CLEAN_poly_reduce
++*
++* Description: Applies Barrett reduction to all coefficients of a polynomial
++*              for details of the Barrett reduction see comments in reduce.c
++*
++* Arguments:   - poly *r: pointer to input/output polynomial
++**************************************************/
++void PQCLEAN_KYBER512_CLEAN_poly_reduce(poly *r) {
++    size_t i;
++    for (i = 0; i < KYBER_N; i++) {
++        r->coeffs[i] = PQCLEAN_KYBER512_CLEAN_barrett_reduce(r->coeffs[i]);
++    }
++}
++
++/*************************************************
++* Name:        PQCLEAN_KYBER512_CLEAN_poly_add
++*
++* Description: Add two polynomials; no modular reduction is performed
++*
++* Arguments: - poly *r: pointer to output polynomial
++*            - const poly *a: pointer to first input polynomial
++*            - const poly *b: pointer to second input polynomial
++**************************************************/
++void PQCLEAN_KYBER512_CLEAN_poly_add(poly *r, const poly *a, const poly *b) {
++    size_t i;
++    for (i = 0; i < KYBER_N; i++) {
++        r->coeffs[i] = a->coeffs[i] + b->coeffs[i];
++    }
++}
++
++/*************************************************
++* Name:        PQCLEAN_KYBER512_CLEAN_poly_sub
++*
++* Description: Subtract two polynomials; no modular reduction is performed
++*
++* Arguments: - poly *r:       pointer to output polynomial
++*            - const poly *a: pointer to first input polynomial
++*            - const poly *b: pointer to second input polynomial
++**************************************************/
++void PQCLEAN_KYBER512_CLEAN_poly_sub(poly *r, const poly *a, const poly *b) {
++    size_t i;
++    for (i = 0; i < KYBER_N; i++) {
++        r->coeffs[i] = a->coeffs[i] - b->coeffs[i];
++    }
++}
+diff --git a/lib/freebl/kyber512/poly.h b/lib/freebl/kyber512/poly.h
+new file mode 100644
+index 000000000..5ca491d15
+--- /dev/null
++++ b/lib/freebl/kyber512/poly.h
+@@ -0,0 +1,37 @@
++#ifndef PQCLEAN_KYBER512_CLEAN_POLY_H
++#define PQCLEAN_KYBER512_CLEAN_POLY_H
++#include "params.h"
++#include <stdint.h>
++
++/*
++ * Elements of R_q = Z_q[X]/(X^n + 1). Represents polynomial
++ * coeffs[0] + X*coeffs[1] + X^2*xoeffs[2] + ... + X^{n-1}*coeffs[n-1]
++ */
++typedef struct {
++    int16_t coeffs[KYBER_N];
++} poly;
++
++void PQCLEAN_KYBER512_CLEAN_poly_compress(uint8_t r[KYBER_POLYCOMPRESSEDBYTES], const poly *a);
++void PQCLEAN_KYBER512_CLEAN_poly_decompress(poly *r, const uint8_t a[KYBER_POLYCOMPRESSEDBYTES]);
++
++void PQCLEAN_KYBER512_CLEAN_poly_tobytes(uint8_t r[KYBER_POLYBYTES], const poly *a);
++void PQCLEAN_KYBER512_CLEAN_poly_frombytes(poly *r, const uint8_t a[KYBER_POLYBYTES]);
++
++void PQCLEAN_KYBER512_CLEAN_poly_frommsg(poly *r, const uint8_t msg[KYBER_INDCPA_MSGBYTES]);
++void PQCLEAN_KYBER512_CLEAN_poly_tomsg(uint8_t msg[KYBER_INDCPA_MSGBYTES], const poly *a);
++
++void PQCLEAN_KYBER512_CLEAN_poly_getnoise_eta1(poly *r, const uint8_t seed[KYBER_SYMBYTES], uint8_t nonce);
++
++void PQCLEAN_KYBER512_CLEAN_poly_getnoise_eta2(poly *r, const uint8_t seed[KYBER_SYMBYTES], uint8_t nonce);
++
++void PQCLEAN_KYBER512_CLEAN_poly_ntt(poly *r);
++void PQCLEAN_KYBER512_CLEAN_poly_invntt_tomont(poly *r);
++void PQCLEAN_KYBER512_CLEAN_poly_basemul_montgomery(poly *r, const poly *a, const poly *b);
++void PQCLEAN_KYBER512_CLEAN_poly_tomont(poly *r);
++
++void PQCLEAN_KYBER512_CLEAN_poly_reduce(poly *r);
++
++void PQCLEAN_KYBER512_CLEAN_poly_add(poly *r, const poly *a, const poly *b);
++void PQCLEAN_KYBER512_CLEAN_poly_sub(poly *r, const poly *a, const poly *b);
++
++#endif
+diff --git a/lib/freebl/kyber512/polyvec.c b/lib/freebl/kyber512/polyvec.c
+new file mode 100644
+index 000000000..9f169f388
+--- /dev/null
++++ b/lib/freebl/kyber512/polyvec.c
+@@ -0,0 +1,181 @@
++#include "params.h"
++#include "poly.h"
++#include "polyvec.h"
++#include <stdint.h>
++
++/*************************************************
++* Name:        PQCLEAN_KYBER512_CLEAN_polyvec_compress
++*
++* Description: Compress and serialize vector of polynomials
++*
++* Arguments:   - uint8_t *r: pointer to output byte array
++*                            (needs space for KYBER_POLYVECCOMPRESSEDBYTES)
++*              - const polyvec *a: pointer to input vector of polynomials
++**************************************************/
++void PQCLEAN_KYBER512_CLEAN_polyvec_compress(uint8_t r[KYBER_POLYVECCOMPRESSEDBYTES], const polyvec *a) {
++    unsigned int i, j, k;
++
++    uint16_t t[4];
++    for (i = 0; i < KYBER_K; i++) {
++        for (j = 0; j < KYBER_N / 4; j++) {
++            for (k = 0; k < 4; k++) {
++                t[k]  = a->vec[i].coeffs[4 * j + k];
++                t[k] += ((int16_t)t[k] >> 15) & KYBER_Q;
++                t[k]  = ((((uint32_t)t[k] << 10) + KYBER_Q / 2) / KYBER_Q) & 0x3ff;
++            }
++
++            r[0] = (uint8_t)(t[0] >> 0);
++            r[1] = (uint8_t)((t[0] >> 8) | (t[1] << 2));
++            r[2] = (uint8_t)((t[1] >> 6) | (t[2] << 4));
++            r[3] = (uint8_t)((t[2] >> 4) | (t[3] << 6));
++            r[4] = (uint8_t)(t[3] >> 2);
++            r += 5;
++        }
++    }
++}
++
++/*************************************************
++* Name:        PQCLEAN_KYBER512_CLEAN_polyvec_decompress
++*
++* Description: De-serialize and decompress vector of polynomials;
++*              approximate inverse of PQCLEAN_KYBER512_CLEAN_polyvec_compress
++*
++* Arguments:   - polyvec *r:       pointer to output vector of polynomials
++*              - const uint8_t *a: pointer to input byte array
++*                                  (of length KYBER_POLYVECCOMPRESSEDBYTES)
++**************************************************/
++void PQCLEAN_KYBER512_CLEAN_polyvec_decompress(polyvec *r, const uint8_t a[KYBER_POLYVECCOMPRESSEDBYTES]) {
++    unsigned int i, j, k;
++
++    uint16_t t[4];
++    for (i = 0; i < KYBER_K; i++) {
++        for (j = 0; j < KYBER_N / 4; j++) {
++            t[0] = (a[0] >> 0) | ((uint16_t)a[1] << 8);
++            t[1] = (a[1] >> 2) | ((uint16_t)a[2] << 6);
++            t[2] = (a[2] >> 4) | ((uint16_t)a[3] << 4);
++            t[3] = (a[3] >> 6) | ((uint16_t)a[4] << 2);
++            a += 5;
++
++            for (k = 0; k < 4; k++) {
++                r->vec[i].coeffs[4 * j + k] = ((uint32_t)(t[k] & 0x3FF) * KYBER_Q + 512) >> 10;
++            }
++        }
++    }
++}
++
++/*************************************************
++* Name:        PQCLEAN_KYBER512_CLEAN_polyvec_tobytes
++*
++* Description: Serialize vector of polynomials
++*
++* Arguments:   - uint8_t *r: pointer to output byte array
++*                            (needs space for KYBER_POLYVECBYTES)
++*              - const polyvec *a: pointer to input vector of polynomials
++**************************************************/
++void PQCLEAN_KYBER512_CLEAN_polyvec_tobytes(uint8_t r[KYBER_POLYVECBYTES], const polyvec *a) {
++    unsigned int i;
++    for (i = 0; i < KYBER_K; i++) {
++        PQCLEAN_KYBER512_CLEAN_poly_tobytes(r + i * KYBER_POLYBYTES, &a->vec[i]);
++    }
++}
++
++/*************************************************
++* Name:        PQCLEAN_KYBER512_CLEAN_polyvec_frombytes
++*
++* Description: De-serialize vector of polynomials;
++*              inverse of PQCLEAN_KYBER512_CLEAN_polyvec_tobytes
++*
++* Arguments:   - uint8_t *r:       pointer to output byte array
++*              - const polyvec *a: pointer to input vector of polynomials
++*                                  (of length KYBER_POLYVECBYTES)
++**************************************************/
++void PQCLEAN_KYBER512_CLEAN_polyvec_frombytes(polyvec *r, const uint8_t a[KYBER_POLYVECBYTES]) {
++    unsigned int i;
++    for (i = 0; i < KYBER_K; i++) {
++        PQCLEAN_KYBER512_CLEAN_poly_frombytes(&r->vec[i], a + i * KYBER_POLYBYTES);
++    }
++}
++
++/*************************************************
++* Name:        PQCLEAN_KYBER512_CLEAN_polyvec_ntt
++*
++* Description: Apply forward NTT to all elements of a vector of polynomials
++*
++* Arguments:   - polyvec *r: pointer to in/output vector of polynomials
++**************************************************/
++void PQCLEAN_KYBER512_CLEAN_polyvec_ntt(polyvec *r) {
++    unsigned int i;
++    for (i = 0; i < KYBER_K; i++) {
++        PQCLEAN_KYBER512_CLEAN_poly_ntt(&r->vec[i]);
++    }
++}
++
++/*************************************************
++* Name:        PQCLEAN_KYBER512_CLEAN_polyvec_invntt_tomont
++*
++* Description: Apply inverse NTT to all elements of a vector of polynomials
++*              and multiply by Montgomery factor 2^16
++*
++* Arguments:   - polyvec *r: pointer to in/output vector of polynomials
++**************************************************/
++void PQCLEAN_KYBER512_CLEAN_polyvec_invntt_tomont(polyvec *r) {
++    unsigned int i;
++    for (i = 0; i < KYBER_K; i++) {
++        PQCLEAN_KYBER512_CLEAN_poly_invntt_tomont(&r->vec[i]);
++    }
++}
++
++/*************************************************
++* Name:        PQCLEAN_KYBER512_CLEAN_polyvec_basemul_acc_montgomery
++*
++* Description: Multiply elements of a and b in NTT domain, accumulate into r,
++*              and multiply by 2^-16.
++*
++* Arguments: - poly *r: pointer to output polynomial
++*            - const polyvec *a: pointer to first input vector of polynomials
++*            - const polyvec *b: pointer to second input vector of polynomials
++**************************************************/
++void PQCLEAN_KYBER512_CLEAN_polyvec_basemul_acc_montgomery(poly *r, const polyvec *a, const polyvec *b) {
++    unsigned int i;
++    poly t;
++
++    PQCLEAN_KYBER512_CLEAN_poly_basemul_montgomery(r, &a->vec[0], &b->vec[0]);
++    for (i = 1; i < KYBER_K; i++) {
++        PQCLEAN_KYBER512_CLEAN_poly_basemul_montgomery(&t, &a->vec[i], &b->vec[i]);
++        PQCLEAN_KYBER512_CLEAN_poly_add(r, r, &t);
++    }
++
++    PQCLEAN_KYBER512_CLEAN_poly_reduce(r);
++}
++
++/*************************************************
++* Name:        PQCLEAN_KYBER512_CLEAN_polyvec_reduce
++*
++* Description: Applies Barrett reduction to each coefficient
++*              of each element of a vector of polynomials;
++*              for details of the Barrett reduction see comments in reduce.c
++*
++* Arguments:   - polyvec *r: pointer to input/output polynomial
++**************************************************/
++void PQCLEAN_KYBER512_CLEAN_polyvec_reduce(polyvec *r) {
++    unsigned int i;
++    for (i = 0; i < KYBER_K; i++) {
++        PQCLEAN_KYBER512_CLEAN_poly_reduce(&r->vec[i]);
++    }
++}
++
++/*************************************************
++* Name:        PQCLEAN_KYBER512_CLEAN_polyvec_add
++*
++* Description: Add vectors of polynomials
++*
++* Arguments: - polyvec *r: pointer to output vector of polynomials
++*            - const polyvec *a: pointer to first input vector of polynomials
++*            - const polyvec *b: pointer to second input vector of polynomials
++**************************************************/
++void PQCLEAN_KYBER512_CLEAN_polyvec_add(polyvec *r, const polyvec *a, const polyvec *b) {
++    unsigned int i;
++    for (i = 0; i < KYBER_K; i++) {
++        PQCLEAN_KYBER512_CLEAN_poly_add(&r->vec[i], &a->vec[i], &b->vec[i]);
++    }
++}
+diff --git a/lib/freebl/kyber512/polyvec.h b/lib/freebl/kyber512/polyvec.h
+new file mode 100644
+index 000000000..e0b2e13d0
+--- /dev/null
++++ b/lib/freebl/kyber512/polyvec.h
+@@ -0,0 +1,26 @@
++#ifndef PQCLEAN_KYBER512_CLEAN_POLYVEC_H
++#define PQCLEAN_KYBER512_CLEAN_POLYVEC_H
++#include "params.h"
++#include "poly.h"
++#include <stdint.h>
++
++typedef struct {
++    poly vec[KYBER_K];
++} polyvec;
++
++void PQCLEAN_KYBER512_CLEAN_polyvec_compress(uint8_t r[KYBER_POLYVECCOMPRESSEDBYTES], const polyvec *a);
++void PQCLEAN_KYBER512_CLEAN_polyvec_decompress(polyvec *r, const uint8_t a[KYBER_POLYVECCOMPRESSEDBYTES]);
++
++void PQCLEAN_KYBER512_CLEAN_polyvec_tobytes(uint8_t r[KYBER_POLYVECBYTES], const polyvec *a);
++void PQCLEAN_KYBER512_CLEAN_polyvec_frombytes(polyvec *r, const uint8_t a[KYBER_POLYVECBYTES]);
++
++void PQCLEAN_KYBER512_CLEAN_polyvec_ntt(polyvec *r);
++void PQCLEAN_KYBER512_CLEAN_polyvec_invntt_tomont(polyvec *r);
++
++void PQCLEAN_KYBER512_CLEAN_polyvec_basemul_acc_montgomery(poly *r, const polyvec *a, const polyvec *b);
++
++void PQCLEAN_KYBER512_CLEAN_polyvec_reduce(polyvec *r);
++
++void PQCLEAN_KYBER512_CLEAN_polyvec_add(polyvec *r, const polyvec *a, const polyvec *b);
++
++#endif
+diff --git a/lib/freebl/kyber512/randombytes.c b/lib/freebl/kyber512/randombytes.c
+new file mode 100644
+index 000000000..5c1bdb754
+--- /dev/null
++++ b/lib/freebl/kyber512/randombytes.c
+@@ -0,0 +1,362 @@
++/*
++The MIT License
++
++Copyright (c) 2017 Daan Sprenkels <hello@dsprenkels.com>
++
++Permission is hereby granted, free of charge, to any person obtaining a copy
++of this software and associated documentation files (the "Software"), to deal
++in the Software without restriction, including without limitation the rights
++to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
++copies of the Software, and to permit persons to whom the Software is
++furnished to do so, subject to the following conditions:
++
++The above copyright notice and this permission notice shall be included in
++all copies or substantial portions of the Software.
++
++THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
++IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
++FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
++AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
++LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
++OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
++THE SOFTWARE.
++*/
++// In the case that are compiling on linux, we need to define _GNU_SOURCE
++// *before* randombytes.h is included. Otherwise SYS_getrandom will not be
++// declared.
++#if defined(__linux__)
++# define _GNU_SOURCE
++#endif /* defined(__linux__) */
++
++#include "randombytes.h"
++
++#if defined(_WIN32)
++/* Windows */
++# include <windows.h>
++# include <wincrypt.h> /* CryptAcquireContext, CryptGenRandom */
++#endif /* defined(_WIN32) */
++
++/* wasi */
++#if defined(__wasi__)
++#include <stdlib.h>
++#endif
++
++#if defined(__linux__)
++/* Linux */
++// We would need to include <linux/random.h>, but not every target has access
++// to the linux headers. We only need RNDGETENTCNT, so we instead inline it.
++// RNDGETENTCNT is originally defined in `include/uapi/linux/random.h` in the
++// linux repo.
++# define RNDGETENTCNT 0x80045200
++
++# include <assert.h>
++# include <errno.h>
++# include <fcntl.h>
++# include <poll.h>
++# include <stdint.h>
++# include <stdio.h>
++# include <sys/ioctl.h>
++# if defined(__linux__) && defined(__GLIBC__) && ((__GLIBC__ > 2) || (__GLIBC_MINOR__ > 24))
++#  define USE_GLIBC
++#  include <sys/random.h>
++# endif /* defined(__linux__) && defined(__GLIBC__) && ((__GLIBC__ > 2) || (__GLIBC_MINOR__ > 24)) */
++# include <sys/stat.h>
++# include <sys/syscall.h>
++# include <sys/types.h>
++# include <unistd.h>
++
++// We need SSIZE_MAX as the maximum read len from /dev/urandom
++# if !defined(SSIZE_MAX)
++#  define SSIZE_MAX (SIZE_MAX / 2 - 1)
++# endif /* defined(SSIZE_MAX) */
++
++#endif /* defined(__linux__) */
++
++
++#if defined(__unix__) || (defined(__APPLE__) && defined(__MACH__))
++/* Dragonfly, FreeBSD, NetBSD, OpenBSD (has arc4random) */
++# include <sys/param.h>
++# if defined(BSD)
++#  include <stdlib.h>
++# endif
++#endif
++
++#if defined(__EMSCRIPTEN__)
++# include <assert.h>
++# include <emscripten.h>
++# include <errno.h>
++# include <stdbool.h>
++#endif /* defined(__EMSCRIPTEN__) */
++
++
++#if defined(_WIN32)
++static int randombytes_win32_randombytes(void *buf, const size_t n) {
++    HCRYPTPROV ctx;
++    BOOL tmp;
++
++    tmp = CryptAcquireContext(&ctx, NULL, NULL, PROV_RSA_FULL,
++                              CRYPT_VERIFYCONTEXT);
++    if (tmp == FALSE) {
++        return -1;
++    }
++
++    tmp = CryptGenRandom(ctx, (unsigned long)n, (BYTE *) buf);
++    if (tmp == FALSE) {
++        return -1;
++    }
++
++    tmp = CryptReleaseContext(ctx, 0);
++    if (tmp == FALSE) {
++        return -1;
++    }
++
++    return 0;
++}
++#endif /* defined(_WIN32) */
++
++#if defined(__wasi__)
++static int randombytes_wasi_randombytes(void *buf, size_t n) {
++    arc4random_buf(buf, n);
++    return 0;
++}
++#endif /* defined(__wasi__) */
++
++#if defined(__linux__) && (defined(USE_GLIBC) || defined(SYS_getrandom))
++# if defined(USE_GLIBC)
++// getrandom is declared in glibc.
++# elif defined(SYS_getrandom)
++static ssize_t getrandom(void *buf, size_t buflen, unsigned int flags) {
++    return syscall(SYS_getrandom, buf, buflen, flags);
++}
++# endif
++
++static int randombytes_linux_randombytes_getrandom(void *buf, size_t n) {
++    /* I have thought about using a separate PRF, seeded by getrandom, but
++     * it turns out that the performance of getrandom is good enough
++     * (250 MB/s on my laptop).
++     */
++    size_t offset = 0, chunk;
++    int ret;
++    while (n > 0) {
++        /* getrandom does not allow chunks larger than 33554431 */
++        chunk = n <= 33554431 ? n : 33554431;
++        do {
++            ret = getrandom((char *)buf + offset, chunk, 0);
++        } while (ret == -1 && errno == EINTR);
++        if (ret < 0) {
++            return ret;
++        }
++        offset += ret;
++        n -= ret;
++    }
++    assert(n == 0);
++    return 0;
++}
++#endif // defined(__linux__) && (defined(USE_GLIBC) || defined(SYS_getrandom))
++
++
++#if defined(__linux__) && !defined(SYS_getrandom)
++static int randombytes_linux_read_entropy_ioctl(int device, int *entropy) {
++    return ioctl(device, RNDGETENTCNT, entropy);
++}
++
++static int randombytes_linux_read_entropy_proc(FILE *stream, int *entropy) {
++    int retcode;
++    do {
++        rewind(stream);
++        retcode = fscanf(stream, "%d", entropy);
++    } while (retcode != 1 && errno == EINTR);
++    if (retcode != 1) {
++        return -1;
++    }
++    return 0;
++}
++
++static int randombytes_linux_wait_for_entropy(int device) {
++    /* We will block on /dev/random, because any increase in the OS' entropy
++     * level will unblock the request. I use poll here (as does libsodium),
++     * because we don't *actually* want to read from the device. */
++    enum { IOCTL, PROC } strategy = IOCTL;
++    const int bits = 128;
++    struct pollfd pfd;
++    int fd;
++    FILE *proc_file;
++    int retcode, retcode_error = 0; // Used as return codes throughout this function
++    int entropy = 0;
++
++    /* If the device has enough entropy already, we will want to return early */
++    retcode = randombytes_linux_read_entropy_ioctl(device, &entropy);
++    // printf("errno: %d (%s)\n", errno, strerror(errno));
++    if (retcode != 0 && (errno == ENOTTY || errno == ENOSYS)) {
++        // The ioctl call on /dev/urandom has failed due to a
++        //   - ENOTTY (unsupported action), or
++        //   - ENOSYS (invalid ioctl; this happens on MIPS, see #22).
++        //
++        // We will fall back to reading from
++        // `/proc/sys/kernel/random/entropy_avail`.  This less ideal,
++        // because it allocates a file descriptor, and it may not work
++        // in a chroot.  But at this point it seems we have no better
++        // options left.
++        strategy = PROC;
++        // Open the entropy count file
++        proc_file = fopen("/proc/sys/kernel/random/entropy_avail", "r");
++    } else if (retcode != 0) {
++        // Unrecoverable ioctl error
++        return -1;
++    }
++    if (entropy >= bits) {
++        return 0;
++    }
++
++    do {
++        fd = open("/dev/random", O_RDONLY);
++    } while (fd == -1 && errno == EINTR); /* EAGAIN will not occur */
++    if (fd == -1) {
++        /* Unrecoverable IO error */
++        return -1;
++    }
++
++    pfd.fd = fd;
++    pfd.events = POLLIN;
++    for (;;) {
++        retcode = poll(&pfd, 1, -1);
++        if (retcode == -1 && (errno == EINTR || errno == EAGAIN)) {
++            continue;
++        } else if (retcode == 1) {
++            if (strategy == IOCTL) {
++                retcode = randombytes_linux_read_entropy_ioctl(device, &entropy);
++            } else if (strategy == PROC) {
++                retcode = randombytes_linux_read_entropy_proc(proc_file, &entropy);
++            } else {
++                return -1; // Unreachable
++            }
++
++            if (retcode != 0) {
++                // Unrecoverable I/O error
++                retcode_error = retcode;
++                break;
++            }
++            if (entropy >= bits) {
++                break;
++            }
++        } else {
++            // Unreachable: poll() should only return -1 or 1
++            retcode_error = -1;
++            break;
++        }
++    }
++    do {
++        retcode = close(fd);
++    } while (retcode == -1 && errno == EINTR);
++    if (strategy == PROC) {
++        do {
++            retcode = fclose(proc_file);
++        } while (retcode == -1 && errno == EINTR);
++    }
++    if (retcode_error != 0) {
++        return retcode_error;
++    }
++    return retcode;
++}
++
++
++static int randombytes_linux_randombytes_urandom(void *buf, size_t n) {
++    int fd;
++    size_t offset = 0, count;
++    ssize_t tmp;
++    do {
++        fd = open("/dev/urandom", O_RDONLY);
++    } while (fd == -1 && errno == EINTR);
++    if (fd == -1) {
++        return -1;
++    }
++    if (randombytes_linux_wait_for_entropy(fd) == -1) {
++        return -1;
++    }
++
++    while (n > 0) {
++        count = n <= SSIZE_MAX ? n : SSIZE_MAX;
++        tmp = read(fd, (char *)buf + offset, count);
++        if (tmp == -1 && (errno == EAGAIN || errno == EINTR)) {
++            continue;
++        }
++        if (tmp == -1) {
++            return -1;    /* Unrecoverable IO error */
++        }
++        offset += tmp;
++        n -= tmp;
++    }
++    close(fd);
++    assert(n == 0);
++    return 0;
++}
++#endif /* defined(__linux__) && !defined(SYS_getrandom) */
++
++
++#if defined(BSD)
++static int randombytes_bsd_randombytes(void *buf, size_t n) {
++    arc4random_buf(buf, n);
++    return 0;
++}
++#endif /* defined(BSD) */
++
++
++#if defined(__EMSCRIPTEN__)
++static int randombytes_js_randombytes_nodejs(void *buf, size_t n) {
++    const int ret = EM_ASM_INT({
++        var crypto;
++        try {
++            crypto = require('crypto');
++        } catch (error) {
++            return -2;
++        }
++        try {
++            writeArrayToMemory(crypto.randomBytes($1), $0);
++            return 0;
++        } catch (error) {
++            return -1;
++        }
++    }, buf, n);
++    switch (ret) {
++    case 0:
++        return 0;
++    case -1:
++        errno = EINVAL;
++        return -1;
++    case -2:
++        errno = ENOSYS;
++        return -1;
++    }
++    assert(false); // Unreachable
++}
++#endif /* defined(__EMSCRIPTEN__) */
++
++
++int randombytes(uint8_t *output, size_t n) {
++    void *buf = (void *)output;
++    #if defined(__EMSCRIPTEN__)
++    return randombytes_js_randombytes_nodejs(buf, n);
++    #elif defined(__linux__)
++    # if defined(USE_GLIBC)
++    /* Use getrandom system call */
++    return randombytes_linux_randombytes_getrandom(buf, n);
++    # elif defined(SYS_getrandom)
++    /* Use getrandom system call */
++    return randombytes_linux_randombytes_getrandom(buf, n);
++    # else
++    /* When we have enough entropy, we can read from /dev/urandom */
++    return randombytes_linux_randombytes_urandom(buf, n);
++    # endif
++    #elif defined(BSD)
++    /* Use arc4random system call */
++    return randombytes_bsd_randombytes(buf, n);
++    #elif defined(_WIN32)
++    /* Use windows API */
++    return randombytes_win32_randombytes(buf, n);
++    #elif defined(__wasi__)
++    /* Use WASI */
++    return randombytes_wasi_randombytes(buf, n);
++    #else
++# error "randombytes(...) is not supported on this platform"
++    #endif
++}
+diff --git a/lib/freebl/kyber512/randombytes.h b/lib/freebl/kyber512/randombytes.h
+new file mode 100644
+index 000000000..aa53c231a
+--- /dev/null
++++ b/lib/freebl/kyber512/randombytes.h
+@@ -0,0 +1,28 @@
++#ifndef PQCLEAN_RANDOMBYTES_H
++#define PQCLEAN_RANDOMBYTES_H
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++#include <stdint.h>
++
++#ifdef _WIN32
++/* Load size_t on windows */
++#include <crtdefs.h>
++#else
++#include <unistd.h>
++#endif /* _WIN32 */
++
++
++/*
++ * Write `n` bytes of high quality random bytes to `buf`
++ */
++#define randombytes     PQCLEAN_randombytes
++int randombytes(uint8_t *output, size_t n);
++
++#ifdef __cplusplus
++}
++#endif
++
++#endif /* PQCLEAN_RANDOMBYTES_H */
+diff --git a/lib/freebl/kyber512/reduce.c b/lib/freebl/kyber512/reduce.c
+new file mode 100644
+index 000000000..7c1366e1c
+--- /dev/null
++++ b/lib/freebl/kyber512/reduce.c
+@@ -0,0 +1,41 @@
++#include "params.h"
++#include "reduce.h"
++#include <stdint.h>
++
++/*************************************************
++* Name:        PQCLEAN_KYBER512_CLEAN_montgomery_reduce
++*
++* Description: Montgomery reduction; given a 32-bit integer a, computes
++*              16-bit integer congruent to a * R^-1 mod q, where R=2^16
++*
++* Arguments:   - int32_t a: input integer to be reduced;
++*                           has to be in {-q2^15,...,q2^15-1}
++*
++* Returns:     integer in {-q+1,...,q-1} congruent to a * R^-1 modulo q.
++**************************************************/
++int16_t PQCLEAN_KYBER512_CLEAN_montgomery_reduce(int32_t a) {
++    int16_t t;
++
++    t = (int16_t)a * QINV;
++    t = (a - (int32_t)t * KYBER_Q) >> 16;
++    return t;
++}
++
++/*************************************************
++* Name:        PQCLEAN_KYBER512_CLEAN_barrett_reduce
++*
++* Description: Barrett reduction; given a 16-bit integer a, computes
++*              centered representative congruent to a mod q in {-(q-1)/2,...,(q-1)/2}
++*
++* Arguments:   - int16_t a: input integer to be reduced
++*
++* Returns:     integer in {-(q-1)/2,...,(q-1)/2} congruent to a modulo q.
++**************************************************/
++int16_t PQCLEAN_KYBER512_CLEAN_barrett_reduce(int16_t a) {
++    int16_t t;
++    const int16_t v = ((1 << 26) + KYBER_Q / 2) / KYBER_Q;
++
++    t  = ((int32_t)v * a + (1 << 25)) >> 26;
++    t *= KYBER_Q;
++    return a - t;
++}
+diff --git a/lib/freebl/kyber512/reduce.h b/lib/freebl/kyber512/reduce.h
+new file mode 100644
+index 000000000..0b5327fa4
+--- /dev/null
++++ b/lib/freebl/kyber512/reduce.h
+@@ -0,0 +1,13 @@
++#ifndef PQCLEAN_KYBER512_CLEAN_REDUCE_H
++#define PQCLEAN_KYBER512_CLEAN_REDUCE_H
++#include "params.h"
++#include <stdint.h>
++
++#define MONT (-1044) // 2^16 mod q
++#define QINV (-3327) // q^-1 mod 2^16
++
++int16_t PQCLEAN_KYBER512_CLEAN_montgomery_reduce(int32_t a);
++
++int16_t PQCLEAN_KYBER512_CLEAN_barrett_reduce(int16_t a);
++
++#endif
+diff --git a/lib/freebl/kyber512/symmetric-shake.c b/lib/freebl/kyber512/symmetric-shake.c
+new file mode 100644
+index 000000000..28c016689
+--- /dev/null
++++ b/lib/freebl/kyber512/symmetric-shake.c
+@@ -0,0 +1,49 @@
++#include "fips202.h"
++#include "params.h"
++#include "symmetric.h"
++#include <stddef.h>
++#include <stdint.h>
++#include <string.h>
++
++/*************************************************
++* Name:        PQCLEAN_KYBER512_CLEAN_kyber_shake128_absorb
++*
++* Description: Absorb step of the SHAKE128 specialized for the Kyber context.
++*
++* Arguments:   - xof_state *state: pointer to (uninitialized) output Keccak state
++*              - const uint8_t *seed: pointer to KYBER_SYMBYTES input to be absorbed into state
++*              - uint8_t i: additional byte of input
++*              - uint8_t j: additional byte of input
++**************************************************/
++void PQCLEAN_KYBER512_CLEAN_kyber_shake128_absorb(xof_state *state,
++        const uint8_t seed[KYBER_SYMBYTES],
++        uint8_t x,
++        uint8_t y) {
++    uint8_t extseed[KYBER_SYMBYTES + 2];
++
++    memcpy(extseed, seed, KYBER_SYMBYTES);
++    extseed[KYBER_SYMBYTES + 0] = x;
++    extseed[KYBER_SYMBYTES + 1] = y;
++
++    shake128_absorb(state, extseed, sizeof(extseed));
++}
++
++/*************************************************
++* Name:        PQCLEAN_KYBER512_CLEAN_kyber_shake256_prf
++*
++* Description: Usage of SHAKE256 as a PRF, concatenates secret and public input
++*              and then generates outlen bytes of SHAKE256 output
++*
++* Arguments:   - uint8_t *out: pointer to output
++*              - size_t outlen: number of requested output bytes
++*              - const uint8_t *key: pointer to the key (of length KYBER_SYMBYTES)
++*              - uint8_t nonce: single-byte nonce (public PRF input)
++**************************************************/
++void PQCLEAN_KYBER512_CLEAN_kyber_shake256_prf(uint8_t *out, size_t outlen, const uint8_t key[KYBER_SYMBYTES], uint8_t nonce) {
++    uint8_t extkey[KYBER_SYMBYTES + 1];
++
++    memcpy(extkey, key, KYBER_SYMBYTES);
++    extkey[KYBER_SYMBYTES] = nonce;
++
++    shake256(out, outlen, extkey, sizeof(extkey));
++}
+diff --git a/lib/freebl/kyber512/symmetric.h b/lib/freebl/kyber512/symmetric.h
+new file mode 100644
+index 000000000..7b9e78ad4
+--- /dev/null
++++ b/lib/freebl/kyber512/symmetric.h
+@@ -0,0 +1,30 @@
++#ifndef PQCLEAN_KYBER512_CLEAN_SYMMETRIC_H
++#define PQCLEAN_KYBER512_CLEAN_SYMMETRIC_H
++#include "fips202.h"
++#include "params.h"
++#include <stddef.h>
++#include <stdint.h>
++
++
++
++typedef shake128ctx xof_state;
++
++void PQCLEAN_KYBER512_CLEAN_kyber_shake128_absorb(xof_state *s,
++        const uint8_t seed[KYBER_SYMBYTES],
++        uint8_t x,
++        uint8_t y);
++
++void PQCLEAN_KYBER512_CLEAN_kyber_shake256_prf(uint8_t *out, size_t outlen, const uint8_t key[KYBER_SYMBYTES], uint8_t nonce);
++
++#define XOF_BLOCKBYTES SHAKE128_RATE
++
++#define hash_h(OUT, IN, INBYTES) sha3_256(OUT, IN, INBYTES)
++#define hash_g(OUT, IN, INBYTES) sha3_512(OUT, IN, INBYTES)
++#define xof_absorb(STATE, SEED, X, Y) PQCLEAN_KYBER512_CLEAN_kyber_shake128_absorb(STATE, SEED, X, Y)
++#define xof_squeezeblocks(OUT, OUTBLOCKS, STATE) shake128_squeezeblocks(OUT, OUTBLOCKS, STATE)
++#define xof_ctx_release(STATE) shake128_ctx_release(STATE)
++#define prf(OUT, OUTBYTES, KEY, NONCE) PQCLEAN_KYBER512_CLEAN_kyber_shake256_prf(OUT, OUTBYTES, KEY, NONCE)
++#define kdf(OUT, IN, INBYTES) shake256(OUT, KYBER_SSBYTES, IN, INBYTES)
++
++
++#endif /* SYMMETRIC_H */
+diff --git a/lib/freebl/kyber512/verify.c b/lib/freebl/kyber512/verify.c
+new file mode 100644
+index 000000000..772293f03
+--- /dev/null
++++ b/lib/freebl/kyber512/verify.c
+@@ -0,0 +1,47 @@
++#include "verify.h"
++#include <stddef.h>
++#include <stdint.h>
++
++/*************************************************
++* Name:        PQCLEAN_KYBER512_CLEAN_verify
++*
++* Description: Compare two arrays for equality in constant time.
++*
++* Arguments:   const uint8_t *a: pointer to first byte array
++*              const uint8_t *b: pointer to second byte array
++*              size_t len:       length of the byte arrays
++*
++* Returns 0 if the byte arrays are equal, 1 otherwise
++**************************************************/
++int PQCLEAN_KYBER512_CLEAN_verify(const uint8_t *a, const uint8_t *b, size_t len) {
++    size_t i;
++    uint8_t r = 0;
++
++    for (i = 0; i < len; i++) {
++        r |= a[i] ^ b[i];
++    }
++
++    return (-(uint64_t)r) >> 63;
++}
++
++/*************************************************
++* Name:        PQCLEAN_KYBER512_CLEAN_cmov
++*
++* Description: Copy len bytes from x to r if b is 1;
++*              don't modify x if b is 0. Requires b to be in {0,1};
++*              assumes two's complement representation of negative integers.
++*              Runs in constant time.
++*
++* Arguments:   uint8_t *r:       pointer to output byte array
++*              const uint8_t *x: pointer to input byte array
++*              size_t len:       Amount of bytes to be copied
++*              uint8_t b:        Condition bit; has to be in {0,1}
++**************************************************/
++void PQCLEAN_KYBER512_CLEAN_cmov(uint8_t *r, const uint8_t *x, size_t len, uint8_t b) {
++    size_t i;
++
++    b = -b;
++    for (i = 0; i < len; i++) {
++        r[i] ^= b & (r[i] ^ x[i]);
++    }
++}
+diff --git a/lib/freebl/kyber512/verify.h b/lib/freebl/kyber512/verify.h
+new file mode 100644
+index 000000000..47c5579a6
+--- /dev/null
++++ b/lib/freebl/kyber512/verify.h
+@@ -0,0 +1,11 @@
++#ifndef PQCLEAN_KYBER512_CLEAN_VERIFY_H
++#define PQCLEAN_KYBER512_CLEAN_VERIFY_H
++#include "params.h"
++#include <stddef.h>
++#include <stdint.h>
++
++int PQCLEAN_KYBER512_CLEAN_verify(const uint8_t *a, const uint8_t *b, size_t len);
++
++void PQCLEAN_KYBER512_CLEAN_cmov(uint8_t *r, const uint8_t *x, size_t len, uint8_t b);
++
++#endif
+diff --git a/lib/freebl/ldvector.c b/lib/freebl/ldvector.c
+index ac3b862b5..f1c2593f5 100644
+--- a/lib/freebl/ldvector.c
++++ b/lib/freebl/ldvector.c
+@@ -376,9 +376,12 @@ static const struct FREEBLVectorStr vector =
+       /* End of version 3.024 */
+       ChaCha20_InitContext,
+       ChaCha20_CreateContext,
+-      ChaCha20_DestroyContext
++      ChaCha20_DestroyContext,
+ 
+       /* End of version 3.025 */
++      CECPQ3_Generate,
++      CECPQ3_Encapsulate,
++      CECPQ3_Decapsulate
+     };
+ 
+ const FREEBLVector*
+diff --git a/lib/freebl/loader.c b/lib/freebl/loader.c
+index 692a8831b..2f8615ef5 100644
+--- a/lib/freebl/loader.c
++++ b/lib/freebl/loader.c
+@@ -2446,3 +2446,27 @@ CMAC_Destroy(CMACContext *ctx, PRBool free_it)
+         return;
+     (vector->p_CMAC_Destroy)(ctx, free_it);
+ }
++
++SECStatus
++CECPQ3_Generate(SECItem **publicKey, SECItem **secretKey)
++{
++    if (!vector && PR_SUCCESS != freebl_RunLoaderOnce())
++        return SECFailure;
++    return (vector->p_CECPQ3_Generate)(publicKey, secretKey);
++}
++
++SECStatus
++CECPQ3_Encapsulate(SECItem **ciphertext, SECItem **sharedSecret, uint8_t *publicKey)
++{
++    if (!vector && PR_SUCCESS != freebl_RunLoaderOnce())
++        return SECFailure;
++    return (vector->p_CECPQ3_Encapsulate)(ciphertext, sharedSecret, publicKey);
++}
++
++SECStatus
++CECPQ3_Decapsulate(SECItem **sharedSecret, uint8_t *ciphertext, uint8_t *secretKey)
++{
++    if (!vector && PR_SUCCESS != freebl_RunLoaderOnce())
++        return SECFailure;
++    return (vector->p_CECPQ3_Decapsulate)(sharedSecret, ciphertext, secretKey);
++}
+diff --git a/lib/freebl/loader.h b/lib/freebl/loader.h
+index eb3046d27..fb2aa9eaa 100644
+--- a/lib/freebl/loader.h
++++ b/lib/freebl/loader.h
+@@ -10,7 +10,7 @@
+ 
+ #include "blapi.h"
+ 
+-#define FREEBL_VERSION 0x0325
++#define FREEBL_VERSION 0x0326
+ 
+ struct FREEBLVectorStr {
+ 
+@@ -834,6 +834,9 @@ struct FREEBLVectorStr {
+ 
+     /* Add new function pointers at the end of this struct and bump
+      * FREEBL_VERSION at the beginning of this file. */
++    SECStatus (*p_CECPQ3_Generate)(SECItem **publicKey, SECItem **secretKey);
++    SECStatus (*p_CECPQ3_Encapsulate)(SECItem **ciphertext, SECItem **sharedSecret, uint8_t *publicKey);
++    SECStatus (*p_CECPQ3_Decapsulate)(SECItem **sharedSecret, uint8_t *ciphertext, uint8_t *privateKey);
+ };
+ 
+ typedef struct FREEBLVectorStr FREEBLVector;
+diff --git a/lib/freebl/manifest.mn b/lib/freebl/manifest.mn
+index b6c5fb358..624657fd3 100644
+--- a/lib/freebl/manifest.mn
++++ b/lib/freebl/manifest.mn
+@@ -151,6 +151,7 @@ CSRCS = \
+ 	tlsprfalg.c \
+ 	jpake.c \
+ 	secmpi.c \
++	cecpq3.c \
+ 	$(MPI_SRCS) \
+ 	$(MPCPU_SRCS) \
+ 	$(ECL_SRCS) \
+diff --git a/lib/pk11wrap/pk11akey.c b/lib/pk11wrap/pk11akey.c
+index 310d65662..53ca55089 100644
+--- a/lib/pk11wrap/pk11akey.c
++++ b/lib/pk11wrap/pk11akey.c
+@@ -44,6 +44,13 @@ pk11_MakeIDFromPublicKey(SECKEYPublicKey *pubKey)
+         case ecKey:
+             pubKeyIndex = &pubKey->u.ec.publicValue;
+             break;
++        case cecpq3Key:
++        {
++            unsigned char buf[1] = {0};
++            pubKeyIndex = SECITEM_AllocItem(NULL, pubKeyIndex, 1);
++            pubKeyIndex->data = buf;
++            break;
++        }
+         default:
+             return NULL;
+     }
+@@ -619,6 +626,9 @@ PK11_ExtractPublicKey(PK11SlotInfo *slot, KeyType keyType, CK_OBJECT_HANDLE id)
+             case CKK_EC:
+                 keyType = ecKey;
+                 break;
++            case CKK_NSS_CECPQ3:
++                keyType = cecpq3Key;
++                break;
+             default:
+                 PORT_SetError(SEC_ERROR_BAD_KEY);
+                 return NULL;
+@@ -773,6 +783,9 @@ PK11_ExtractPublicKey(PK11SlotInfo *slot, KeyType keyType, CK_OBJECT_HANDLE id)
+                                            &pubKey->u.ec.DEREncodedParams, value,
+                                            &pubKey->u.ec.publicValue);
+             break;
++        case cecpq3Key:
++            crv = CKR_OK;
++            break;
+         case fortezzaKey:
+         case nullKey:
+         default:
+@@ -826,6 +839,9 @@ PK11_MakePrivKey(PK11SlotInfo *slot, KeyType keyType,
+             case CKK_EC:
+                 keyType = ecKey;
+                 break;
++            case CKK_NSS_CECPQ3:
++                keyType = cecpq3Key;
++                break;
+             default:
+                 break;
+         }
+@@ -1208,6 +1224,15 @@ PK11_GenerateKeyPairWithOpFlags(PK11SlotInfo *slot, CK_MECHANISM_TYPE type,
+         { CKA_MODIFIABLE, NULL, 0 },
+     };
+     SECKEYECParams *ecParams;
++    CK_ATTRIBUTE cecpq3PubTemplate[] = {
++        { CKA_TOKEN, NULL, 0 },
++        { CKA_DERIVE, NULL, 0 },
++        { CKA_WRAP, NULL, 0 },
++        { CKA_VERIFY, NULL, 0 },
++        { CKA_VERIFY_RECOVER, NULL, 0 },
++        { CKA_ENCRYPT, NULL, 0 },
++        { CKA_MODIFIABLE, NULL, 0 },
++    };
+ 
+     /*CK_ULONG key_size = 0;*/
+     CK_ATTRIBUTE *pubTemplate;
+@@ -1244,7 +1269,7 @@ PK11_GenerateKeyPairWithOpFlags(PK11SlotInfo *slot, CK_MECHANISM_TYPE type,
+         return NULL;
+     }
+ 
+-    if (!param) {
++    if (!param && type != CKM_NSS_CECPQ3_KEY_GEN) {
+         PORT_SetError(SEC_ERROR_INVALID_ARGS);
+         return NULL;
+     }
+@@ -1413,6 +1438,12 @@ PK11_GenerateKeyPairWithOpFlags(PK11SlotInfo *slot, CK_MECHANISM_TYPE type,
+                 test_mech2.mechanism = CKM_ECDSA;
+             }
+             break;
++        case CKM_NSS_CECPQ3_KEY_GEN:
++            test_mech.mechanism = CKM_NSS_CECPQ3_KEY_GEN;
++            attrs = cecpq3PubTemplate;
++            pubTemplate = cecpq3PubTemplate;
++            keyType = cecpq3Key;
++            break;
+         default:
+             PORT_SetError(SEC_ERROR_BAD_KEY);
+             return NULL;
+diff --git a/lib/pk11wrap/pk11cert.c b/lib/pk11wrap/pk11cert.c
+index 84d830035..d7a951ffe 100644
+--- a/lib/pk11wrap/pk11cert.c
++++ b/lib/pk11wrap/pk11cert.c
+@@ -177,6 +177,7 @@ PK11_IsUserCert(PK11SlotInfo *slot, CERTCertificate *cert,
+                 break;
+             case keaKey:
+             case fortezzaKey:
++            case cecpq3Key:
+             case nullKey:
+                 /* fall through and return false */
+                 break;
+diff --git a/lib/pk11wrap/pk11mech.c b/lib/pk11wrap/pk11mech.c
+index 685f0e934..c57a330e0 100644
+--- a/lib/pk11wrap/pk11mech.c
++++ b/lib/pk11wrap/pk11mech.c
+@@ -425,6 +425,8 @@ PK11_GetKeyType(CK_MECHANISM_TYPE type, unsigned long len)
+         case CKM_TLS_PRF_GENERAL:
+         case CKM_NSS_TLS_PRF_GENERAL_SHA256:
+             return CKK_GENERIC_SECRET;
++        case CKM_NSS_CECPQ3_KEY_GEN:
++            return CKK_NSS_CECPQ3;
+         default:
+             return pk11_lookup(type)->keyType;
+     }
+diff --git a/lib/pk11wrap/pk11skey.c b/lib/pk11wrap/pk11skey.c
+index 66b4ed6a1..2c2af45ab 100644
+--- a/lib/pk11wrap/pk11skey.c
++++ b/lib/pk11wrap/pk11skey.c
+@@ -2104,6 +2104,7 @@ PK11_PubDerive(SECKEYPrivateKey *privKey, SECKEYPublicKey *pubKey,
+         case rsaKey:
+         case rsaPssKey:
+         case rsaOaepKey:
++        case cecpq3Key:
+         case nullKey:
+             PORT_SetError(SEC_ERROR_BAD_KEY);
+             break;
+diff --git a/lib/pk11wrap/pk11slot.c b/lib/pk11wrap/pk11slot.c
+index 1b150888d..22038183c 100644
+--- a/lib/pk11wrap/pk11slot.c
++++ b/lib/pk11wrap/pk11slot.c
+@@ -93,7 +93,8 @@ static PK11SlotList
+     pk11_tlsSlotList,
+     pk11_randomSlotList,
+     pk11_sha256SlotList,
+-    pk11_sha512SlotList; /* slots do SHA512 and SHA384 */
++    pk11_sha512SlotList, /* slots do SHA512 and SHA384 */
++    pk11_cecpq3SlotList;
+ 
+ /************************************************************
+  * Generic Slot List and Slot List element manipulations
+@@ -847,6 +848,7 @@ PK11_InitSlotLists(void)
+     pk11_InitSlotListStatic(&pk11_randomSlotList);
+     pk11_InitSlotListStatic(&pk11_sha256SlotList);
+     pk11_InitSlotListStatic(&pk11_sha512SlotList);
++    pk11_InitSlotListStatic(&pk11_cecpq3SlotList);
+     return SECSuccess;
+ }
+ 
+@@ -873,6 +875,7 @@ PK11_DestroySlotLists(void)
+     pk11_FreeSlotListStatic(&pk11_randomSlotList);
+     pk11_FreeSlotListStatic(&pk11_sha256SlotList);
+     pk11_FreeSlotListStatic(&pk11_sha512SlotList);
++    pk11_FreeSlotListStatic(&pk11_cecpq3SlotList);
+     return;
+ }
+ 
+@@ -951,6 +954,8 @@ PK11_GetSlotList(CK_MECHANISM_TYPE type)
+             return &pk11_ideaSlotList;
+         case CKM_FAKE_RANDOM:
+             return &pk11_randomSlotList;
++        case CKM_NSS_CECPQ3_KEY_GEN:
++            return &pk11_cecpq3SlotList;
+     }
+     return NULL;
+ }
+diff --git a/lib/softoken/pkcs11.c b/lib/softoken/pkcs11.c
+index 28d219d8e..2539c70e7 100644
+--- a/lib/softoken/pkcs11.c
++++ b/lib/softoken/pkcs11.c
+@@ -606,7 +606,9 @@ static const struct mechanismList mechanisms[] = {
+     { CKM_NSS_IKE_PRF_PLUS_DERIVE, { 8, 255 * 64, CKF_DERIVE }, PR_TRUE },
+     { CKM_NSS_IKE_PRF_DERIVE, { 8, 64, CKF_DERIVE }, PR_TRUE },
+     { CKM_NSS_IKE1_PRF_DERIVE, { 8, 64, CKF_DERIVE }, PR_TRUE },
+-    { CKM_NSS_IKE1_APP_B_PRF_DERIVE, { 8, 255 * 64, CKF_DERIVE }, PR_TRUE }
++    { CKM_NSS_IKE1_APP_B_PRF_DERIVE, { 8, 255 * 64, CKF_DERIVE }, PR_TRUE },
++    /* --------------------CECPQ3 ----------------------- */
++    { CKM_NSS_CECPQ3_KEY_GEN, { 0, 0, CKF_GENERATE }, PR_TRUE },
+ };
+ static const CK_ULONG mechanismCount = sizeof(mechanisms) / sizeof(mechanisms[0]);
+ 
+@@ -1048,6 +1050,13 @@ sftk_handlePublicKeyObject(SFTKSession *session, SFTKObject *object,
+             recover = CK_FALSE;
+             wrap = CK_FALSE;
+             break;
++        case CKK_NSS_CECPQ3:
++            derive = CK_TRUE;
++            verify = CK_FALSE;
++            encrypt = CK_FALSE;
++            recover = CK_FALSE;
++            wrap = CK_FALSE;
++            break;
+         default:
+             return CKR_ATTRIBUTE_VALUE_INVALID;
+     }
+@@ -1247,6 +1256,15 @@ sftk_handlePrivateKeyObject(SFTKSession *session, SFTKObject *object, CK_KEY_TYP
+             derive = CK_TRUE;
+             createObjectInfo = PR_FALSE;
+             break;
++        case CKK_NSS_CECPQ3:
++            if (!sftk_hasAttribute(object, CKA_VALUE)) {
++                return CKR_TEMPLATE_INCOMPLETE;
++            }
++            encrypt = CK_FALSE;
++            sign = CK_FALSE;
++            recover = CK_FALSE;
++            wrap = CK_FALSE;
++            break;
+         default:
+             return CKR_ATTRIBUTE_VALUE_INVALID;
+     }
+@@ -1930,6 +1948,9 @@ sftk_GetPubKey(SFTKObject *object, CK_KEY_TYPE key_type,
+                 crv = CKR_ATTRIBUTE_VALUE_INVALID;
+             }
+             break;
++        case CKK_NSS_CECPQ3:
++            crv = CKR_OK;
++            break;
+         default:
+             crv = CKR_KEY_TYPE_INCONSISTENT;
+             break;
+@@ -2083,7 +2104,8 @@ sftk_mkPrivKey(SFTKObject *object, CK_KEY_TYPE key_type, CK_RV *crvp)
+ #endif
+             }
+             break;
+-
++        case CKK_NSS_CECPQ3:
++            break;
+         default:
+             crv = CKR_KEY_TYPE_INCONSISTENT;
+             break;
+diff --git a/lib/softoken/pkcs11c.c b/lib/softoken/pkcs11c.c
+index a0ef85aca..b45074d20 100644
+--- a/lib/softoken/pkcs11c.c
++++ b/lib/softoken/pkcs11c.c
+@@ -5677,6 +5677,32 @@ NSC_GenerateKeyPair(CK_SESSION_HANDLE hSession,
+             PORT_FreeArena(ecPriv->ecParams.arena, PR_TRUE);
+             break;
+ 
++        case CKM_NSS_CECPQ3_KEY_GEN:
++            key_type = CKK_NSS_CECPQ3;
++
++            SECItem *pub = NULL;
++            SECItem *priv = NULL;
++
++            rv = CECPQ3_Generate(&pub, &priv);
++            if (rv != SECSuccess) {
++                crv = sftk_MapCryptError(PORT_GetError());
++                break;
++            }
++
++            crv = sftk_AddAttributeType(publicKey, CKA_VALUE,
++                                        sftk_item_expand(pub));
++            if (crv != CKR_OK) {
++                break;
++            }
++
++            crv = sftk_AddAttributeType(privateKey, CKA_VALUE,
++                                        sftk_item_expand(priv));
++            if (crv != CKR_OK) {
++                break;
++            }
++
++            break;
++
+         default:
+             crv = CKR_MECHANISM_INVALID;
+     }
+@@ -5760,7 +5786,7 @@ NSC_GenerateKeyPair(CK_SESSION_HANDLE hSession,
+                                   &cktrue, sizeof(CK_BBOOL));
+     }
+ 
+-    if (crv == CKR_OK) {
++    if (crv == CKR_OK && key_type != CKK_NSS_CECPQ3) {
+         /* Perform FIPS 140-2 pairwise consistency check. */
+         crv = sftk_PairwiseConsistencyCheck(hSession, slot,
+                                             publicKey, privateKey, key_type);
+diff --git a/lib/ssl/manifest.mn b/lib/ssl/manifest.mn
+index fedc42b4e..506dddf1e 100644
+--- a/lib/ssl/manifest.mn
++++ b/lib/ssl/manifest.mn
+@@ -63,6 +63,7 @@ CSRCS = \
+         tls13psk.c \
+         tls13replay.c \
+         tls13subcerts.c \
++        tls13cecpq3.c \
+         $(NULL)
+ 
+ LIBRARY_NAME = ssl
+diff --git a/lib/ssl/ssl.gyp b/lib/ssl/ssl.gyp
+index 2aa35cc96..e9446cee5 100644
+--- a/lib/ssl/ssl.gyp
++++ b/lib/ssl/ssl.gyp
+@@ -52,6 +52,7 @@
+         'tls13psk.c',
+         'tls13replay.c',
+         'tls13subcerts.c',
++        'tls13cecpq3.c',
+       ],
+       'conditions': [
+         [ 'OS=="win"', {
+diff --git a/lib/ssl/ssl3con.c b/lib/ssl/ssl3con.c
+index ad7480586..a3efd0018 100644
+--- a/lib/ssl/ssl3con.c
++++ b/lib/ssl/ssl3con.c
+@@ -377,6 +377,7 @@ static const CK_MECHANISM_TYPE kea_alg_defs[] = {
+     CKM_ECDH1_DERIVE,      /* ssl_kea_ecdh_psk */
+     CKM_DH_PKCS_DERIVE,    /* ssl_kea_dh_psk */
+     CKM_INVALID_MECHANISM, /* ssl_kea_tls13_any */
++    CKM_INVALID_MECHANISM, /* ssl_kea_cecpq3 */
+ };
+ PR_STATIC_ASSERT(PR_ARRAY_SIZE(kea_alg_defs) == ssl_kea_size);
+ 
+@@ -735,6 +736,9 @@ ssl_KEAEnabled(const sslSocket *ss, SSLKEAType keaType)
+         case ssl_kea_ecdh_psk:
+             return ssl_NamedGroupTypeEnabled(ss, ssl_kea_ecdh);
+ 
++        case ssl_kea_cecpq3:
++            return ssl_NamedGroupTypeEnabled(ss, ssl_kea_cecpq3);
++
+         case ssl_kea_tls13_any:
+             return PR_TRUE;
+ 
+@@ -4314,6 +4318,7 @@ ssl_SignatureSchemeToHashType(SSLSignatureScheme scheme)
+         case ssl_sig_none:
+         case ssl_sig_ed25519:
+         case ssl_sig_ed448:
++        case ssl_kemtls_with_cecpq3:
+             break;
+     }
+     PORT_Assert(0);
+@@ -4340,6 +4345,9 @@ PRBool
+ ssl_SignatureSchemeValid(SSLSignatureScheme scheme, SECOidTag spkiOid,
+                          PRBool isTls13)
+ {
++    if (isTls13 && scheme == ssl_kemtls_with_cecpq3) {
++        return PR_TRUE;
++    }
+     if (!ssl_IsSupportedSignatureScheme(scheme)) {
+         return PR_FALSE;
+     }
+@@ -4469,6 +4477,9 @@ ssl_SignatureSchemeFromSpki(const CERTSubjectPublicKeyInfo *spki,
+     if (isTls13 && spkiOid == SEC_OID_ANSIX962_EC_PUBLIC_KEY) {
+         return ssl_SignatureSchemeFromEcSpki(spki, scheme);
+     }
++    if (isTls13 && spkiOid == SEC_OID_KEMTLS_WITH_CECPQ3) {
++        return ssl_kemtls_with_cecpq3;
++    }
+ 
+     *scheme = ssl_sig_none;
+     return SECSuccess;
+@@ -4588,6 +4599,7 @@ ssl_IsSupportedSignatureScheme(SSLSignatureScheme scheme)
+         case ssl_sig_none:
+         case ssl_sig_ed25519:
+         case ssl_sig_ed448:
++        case ssl_kemtls_with_cecpq3:
+             return PR_FALSE;
+     }
+     return PR_FALSE;
+@@ -4686,6 +4698,10 @@ ssl_SignatureSchemeToAuthType(SSLSignatureScheme scheme)
+         case ssl_sig_dsa_sha384:
+         case ssl_sig_dsa_sha512:
+             return ssl_auth_dsa;
++        case ssl_kemtls_with_cecpq3:
++            /* Shouldn't matter, we don't rely on this field.
++             * TODO(goutam): Clean it up eventually. */
++            return ssl_auth_null;
+ 
+         default:
+             PORT_Assert(0);
+@@ -11510,6 +11526,11 @@ ssl_SetAuthKeyBits(sslSocket *ss, const SECKEYPublicKey *pubKey)
+             minKey = ss->sec.authKeyBits;
+             break;
+ 
++        case cecpq3Key:
++            /* Don't check strength, we're doing KEMTLS. */
++            minKey = ss->sec.authKeyBits;
++            break;
++
+         default:
+             FATAL_ERROR(ss, SEC_ERROR_LIBRARY_FAILURE, internal_error);
+             return SECFailure;
+@@ -11637,7 +11658,12 @@ ssl3_AuthCertificate(sslSocket *ss)
+ 
+     if (!ss->sec.isServer) {
+         if (ss->version >= SSL_LIBRARY_VERSION_TLS_1_3) {
+-            TLS13_SET_HS_STATE(ss, wait_cert_verify);
++            if(ss->sec.signatureScheme == ssl_kemtls_with_cecpq3) {
++                ss->doingKEMTLS = PR_TRUE;
++                TLS13_SET_HS_STATE(ss, wait_finished);
++            } else {
++                TLS13_SET_HS_STATE(ss, wait_cert_verify);
++            }
+         } else {
+             /* Ephemeral suites require ServerKeyExchange. */
+             if (ss->ssl3.hs.kea_def->ephemeral) {
+diff --git a/lib/ssl/sslimpl.h b/lib/ssl/sslimpl.h
+index 5a9da21a0..67694d1a1 100644
+--- a/lib/ssl/sslimpl.h
++++ b/lib/ssl/sslimpl.h
+@@ -128,7 +128,7 @@ typedef enum { SSLAppOpRead = 0,
+ #define DTLS_RETRANSMIT_FINISHED_MS 30000
+ 
+ /* default number of entries in namedGroupPreferences */
+-#define SSL_NAMED_GROUP_COUNT 31
++#define SSL_NAMED_GROUP_COUNT 32
+ 
+ /* The maximum DH and RSA bit-length supported. */
+ #define SSL_MAX_DH_KEY_BITS 8192
+@@ -245,7 +245,7 @@ typedef struct {
+ #define MAX_DTLS_SRTP_CIPHER_SUITES 4
+ 
+ /* MAX_SIGNATURE_SCHEMES allows for all the values we support. */
+-#define MAX_SIGNATURE_SCHEMES 18
++#define MAX_SIGNATURE_SCHEMES 19
+ 
+ typedef struct sslOptionsStr {
+     /* If SSL_SetNextProtoNego has been called, then this contains the
+@@ -762,6 +762,9 @@ typedef struct SSL3HandshakeStateStr {
+     sslBuffer greaseEchBuf;     /* Client: Remember GREASE ECH, as advertised, for CH2 (HRR case).
+                                   Server: Remember HRR Grease Value, for transcript calculations */
+     PRBool echInvalidExtension; /* Client: True if the server offered an invalid extension for the ClientHelloInner */
++
++    /* For auth via KEMTLS */
++    PK11SymKey *ephemeralSecretKEMTLS;
+ } SSL3HandshakeState;
+ 
+ #define SSL_ASSERT_HASHES_EMPTY(ss)                                  \
+@@ -1027,6 +1030,7 @@ struct sslSocketStr {
+      * these on the client side.  The server inserts a single value into this
+      * list for all versions. */
+     PRCList /*<sslEphemeralKeyPair>*/ ephemeralKeyPairs;
++    SECItem *keyShareToSend;
+ 
+     /* Callbacks */
+     SSLAuthCertificate authCertificate;
+@@ -1145,6 +1149,10 @@ struct sslSocketStr {
+ 
+     /* An out-of-band PSK. */
+     sslPsk *psk;
++
++    /* KEMTLS */
++    PRBool doingKEMTLS;
++    PRBool computeKEMTLSHandshakeSecrets;
+ };
+ 
+ struct sslSelfEncryptKeysStr {
+@@ -1980,6 +1988,10 @@ SECStatus SSLExp_SetTls13GreaseEchSize(PRFileDesc *fd, PRUint8 size);
+ SECStatus SSLExp_EnableTls13BackendEch(PRFileDesc *fd, PRBool enabled);
+ SECStatus SSLExp_CallExtensionWriterOnEchInner(PRFileDesc *fd, PRBool enabled);
+ 
++/* CECPQ3 */
++
++SECStatus tls13_GenerateCECPQ3KeyPair(const sslSocket *ss, const sslNamedGroupDef *group, sslEphemeralKeyPair **keyPair);
++
+ SEC_END_PROTOS
+ 
+ #if defined(XP_UNIX) || defined(XP_OS2) || defined(XP_BEOS)
+diff --git a/lib/ssl/sslsock.c b/lib/ssl/sslsock.c
+index 6b40be759..252ed0978 100644
+--- a/lib/ssl/sslsock.c
++++ b/lib/ssl/sslsock.c
+@@ -159,6 +159,7 @@ static const PRUint16 srtpCiphers[] = {
+     }
+ 
+ const sslNamedGroupDef ssl_named_groups[] = {
++    { ssl_grp_cecpq3, 128, ssl_kea_cecpq3, 0, PR_TRUE },
+     /* Note that 256 for 25519 is a lie, but we only use it for checking bit
+      * security and expect 256 bits there (not 255). */
+     { ssl_grp_ec_curve25519, 256, ssl_kea_ecdh, SEC_OID_CURVE25519, PR_TRUE },
+diff --git a/lib/ssl/sslt.h b/lib/ssl/sslt.h
+index 59e82e34d..4f574ffe8 100644
+--- a/lib/ssl/sslt.h
++++ b/lib/ssl/sslt.h
+@@ -83,6 +83,7 @@ typedef enum {
+     ssl_kea_ecdh_psk = 5,
+     ssl_kea_dh_psk = 6,
+     ssl_kea_tls13_any = 7,
++    ssl_kea_cecpq3 = 8,
+     ssl_kea_size /* number of ssl_kea_ algorithms */
+ } SSLKEAType;
+ 
+@@ -159,6 +160,12 @@ typedef enum {
+      * This should not be passed to SSL_SignatureSchemePrefSet(); this
+      * signature scheme is always used and cannot be disabled. */
+     ssl_sig_rsa_pkcs1_sha1md5 = 0x10101,
++
++    /* For authentication via KEMs */
++    /* Code point taken from:
++     * https://github.com/cloudflare/go/blob/cf-pq-kemtls/src/crypto/tls/common.go#L516
++     */
++    ssl_kemtls_with_cecpq3 = 0xfe01,
+ } SSLSignatureScheme;
+ 
+ /* Deprecated names maintained only for source compatibility. */
+@@ -258,7 +265,8 @@ typedef enum {
+     ssl_grp_ffdhe_6144 = 259,
+     ssl_grp_ffdhe_8192 = 260,
+     ssl_grp_none = 65537,        /* special value */
+-    ssl_grp_ffdhe_custom = 65538 /* special value */
++    ssl_grp_ffdhe_custom = 65538, /* special value */
++    ssl_grp_cecpq3 = 0x01fc
+ } SSLNamedGroup;
+ 
+ typedef struct SSLExtraServerCertDataStr {
+diff --git a/lib/ssl/tls13cecpq3.c b/lib/ssl/tls13cecpq3.c
+new file mode 100644
+index 000000000..79027b9e5
+--- /dev/null
++++ b/lib/ssl/tls13cecpq3.c
+@@ -0,0 +1,47 @@
++/* -*- Mode: C; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 4 -*- */
++/*
++ *
++ * This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
++
++#include "secitem.h"
++#include "sslimpl.h"
++#include "pk11func.h"
++#include "blapi.h"
++
++SECStatus
++tls13_GenerateCECPQ3KeyPair(const sslSocket *ss,
++                            const sslNamedGroupDef *group,
++                            sslEphemeralKeyPair **keyPair)
++{
++    SECKEYPrivateKey *privKey = NULL;
++    SECKEYPublicKey *pubKey = NULL;
++    sslEphemeralKeyPair *pair;
++
++    PK11SlotInfo *slot = PK11_GetBestSlot(CKM_NSS_CECPQ3_KEY_GEN, NULL);
++    if (!slot) {
++        return SECFailure;
++    }
++
++    privKey = PK11_GenerateKeyPair(slot, CKM_NSS_CECPQ3_KEY_GEN, NULL, &pubKey,
++                                 PR_FALSE, PR_FALSE, NULL);
++    PK11_FreeSlot(slot);
++
++
++    if (!privKey || !pubKey ||
++        !(pair = ssl_NewEphemeralKeyPair(group, privKey, pubKey))) {
++        if (privKey) {
++            SECKEY_DestroyPrivateKey(privKey);
++        }
++        if (pubKey) {
++            SECKEY_DestroyPublicKey(pubKey);
++        }
++        ssl_MapLowLevelError(SEC_ERROR_KEYGEN_FAIL);
++        return SECFailure;
++    }
++
++    *keyPair = pair;
++
++    return SECSuccess;
++}
+diff --git a/lib/ssl/tls13con.c b/lib/ssl/tls13con.c
+index 51dfebff3..a15ad60f4 100644
+--- a/lib/ssl/tls13con.c
++++ b/lib/ssl/tls13con.c
+@@ -26,6 +26,7 @@
+ #include "tls13hashstate.h"
+ #include "tls13subcerts.h"
+ #include "tls13psk.h"
++#include "blapi.h"
+ 
+ static SECStatus tls13_SetCipherSpec(sslSocket *ss, PRUint16 epoch,
+                                      SSLSecretDirection install,
+@@ -53,6 +54,8 @@ static SECStatus
+ tls13_SendCertificateVerify(sslSocket *ss, SECKEYPrivateKey *privKey);
+ static SECStatus tls13_HandleCertificateVerify(
+     sslSocket *ss, PRUint8 *b, PRUint32 length);
++static SECStatus tls13_HandleClientKEMTLS(sslSocket *ss);
++static SECStatus tls13_HandleServerKEMTLS(sslSocket *ss, PRUint8 *b, PRUint32 length);
+ static SECStatus tls13_RecoverWrappedSharedSecret(sslSocket *ss,
+                                                   sslSessionID *sid);
+ static SECStatus
+@@ -81,8 +84,12 @@ static SECStatus tls13_VerifyFinished(sslSocket *ss, SSLHandshakeType message,
+                                       const SSL3Hashes *hashes);
+ static SECStatus tls13_ClientHandleFinished(sslSocket *ss,
+                                             PRUint8 *b, PRUint32 length);
++static SECStatus tls13_ClientHandleKEMTLSFinished(sslSocket *ss,
++                                            PRUint8 *b, PRUint32 length);
+ static SECStatus tls13_ServerHandleFinished(sslSocket *ss,
+                                             PRUint8 *b, PRUint32 length);
++static SECStatus tls13_ServerHandleKEMTLSFinished(sslSocket *ss,
++                                            PRUint8 *b, PRUint32 length);
+ static SECStatus tls13_SendNewSessionTicket(sslSocket *ss,
+                                             const PRUint8 *appToken,
+                                             unsigned int appTokenLen);
+@@ -118,6 +125,11 @@ const char kHkdfPurposeKey[] = "key";
+ const char kHkdfPurposeSn[] = "sn";
+ const char kHkdfPurposeIv[] = "iv";
+ 
++/* For KEMTLS. */
++const char kHkdfLabelAuthenticatedHandshakeTrafficSecret[] = "ahs traffic";
++const char kHkdfLabelClientFinishedSecret[] = "c finished";
++const char kHkdfLabelServerFinishedSecret[] = "s finished";
++
+ const char keylogLabelClientEarlyTrafficSecret[] = "CLIENT_EARLY_TRAFFIC_SECRET";
+ const char keylogLabelClientHsTrafficSecret[] = "CLIENT_HANDSHAKE_TRAFFIC_SECRET";
+ const char keylogLabelServerHsTrafficSecret[] = "SERVER_HANDSHAKE_TRAFFIC_SECRET";
+@@ -389,6 +401,12 @@ tls13_CreateKeyShare(sslSocket *ss, const sslNamedGroupDef *groupDef,
+                 return SECFailure;
+             }
+             break;
++        case ssl_kea_cecpq3:
++            rv = tls13_GenerateCECPQ3KeyPair(ss, groupDef, keyPair);
++            if (rv != SECSuccess) {
++                return SECFailure;
++            }
++            break;
+         default:
+             PORT_Assert(0);
+             PORT_SetError(SEC_ERROR_LIBRARY_FAILURE);
+@@ -961,8 +979,14 @@ tls13_HandlePostHelloHandshakeMessage(sslSocket *ss, PRUint8 *b, PRUint32 length
+ 
+         case ssl_hs_finished:
+             if (ss->sec.isServer) {
++                if(ss->doingKEMTLS) {
++                    return tls13_ServerHandleKEMTLSFinished(ss, b, length);
++                }
+                 return tls13_ServerHandleFinished(ss, b, length);
+             } else {
++                if(ss->doingKEMTLS) {
++                    return tls13_ClientHandleKEMTLSFinished(ss, b, length);
++                }
+                 return tls13_ClientHandleFinished(ss, b, length);
+             }
+ 
+@@ -972,6 +996,14 @@ tls13_HandlePostHelloHandshakeMessage(sslSocket *ss, PRUint8 *b, PRUint32 length
+         case ssl_hs_key_update:
+             return tls13_HandleKeyUpdate(ss, b, length);
+ 
++        case ssl_hs_client_key_exchange:
++            if (ss->doingKEMTLS) {
++                return tls13_HandleServerKEMTLS(ss, b, length);
++            } else {
++                FATAL_ERROR(ss, SSL_ERROR_RX_UNKNOWN_HANDSHAKE, unexpected_message);
++                return SECFailure;
++            }
++
+         default:
+             FATAL_ERROR(ss, SSL_ERROR_RX_UNKNOWN_HANDSHAKE, unexpected_message);
+             return SECFailure;
+@@ -1232,6 +1264,7 @@ tls13_ComputeHandshakeSecrets(sslSocket *ss)
+     SECStatus rv;
+     PK11SymKey *derivedSecret = NULL;
+     PK11SymKey *newSecret = NULL;
++    const char *hkdfLabel;
+ 
+     PK11_FreeSymKey(ss->ssl3.hs.dheSecret);
+     ss->ssl3.hs.dheSecret = NULL;
+@@ -1239,10 +1272,16 @@ tls13_ComputeHandshakeSecrets(sslSocket *ss)
+     SSL_TRC(5, ("%d: TLS13[%d]: compute handshake secrets (%s)",
+                 SSL_GETPID(), ss->fd, SSL_ROLE(ss)));
+ 
++    if (ss->computeKEMTLSHandshakeSecrets) {
++        hkdfLabel = kHkdfLabelAuthenticatedHandshakeTrafficSecret;
++    } else {
++        hkdfLabel = kHkdfLabelHandshakeTrafficSecret;
++    }
++
+     /* Now compute |*HsTrafficSecret| */
+     rv = tls13_DeriveSecretWrap(ss, ss->ssl3.hs.currentSecret,
+                                 kHkdfLabelClient,
+-                                kHkdfLabelHandshakeTrafficSecret,
++                                hkdfLabel,
+                                 keylogLabelClientHsTrafficSecret,
+                                 &ss->ssl3.hs.clientHsTrafficSecret);
+     if (rv != SECSuccess) {
+@@ -1251,7 +1290,7 @@ tls13_ComputeHandshakeSecrets(sslSocket *ss)
+     }
+     rv = tls13_DeriveSecretWrap(ss, ss->ssl3.hs.currentSecret,
+                                 kHkdfLabelServer,
+-                                kHkdfLabelHandshakeTrafficSecret,
++                                hkdfLabel,
+                                 keylogLabelServerHsTrafficSecret,
+                                 &ss->ssl3.hs.serverHsTrafficSecret);
+     if (rv != SECSuccess) {
+@@ -1804,8 +1843,21 @@ tls13_NegotiateAuthentication(sslSocket *ss)
+         ss->xtnData.selectedPsk = NULL;
+     }
+ 
+-    SSL_TRC(3, ("%d: TLS13[%d]: selected certificate authentication",
+-                SSL_GETPID(), ss->fd));
++    if (ss->xtnData.peerRequestedDelegCred) {
++        for (size_t i = 0; i < ss->xtnData.numDelegCredSigSchemes; i++) {
++            if (ss->xtnData.delegCredSigSchemes[i] == ssl_kemtls_with_cecpq3) {
++                ss->doingKEMTLS = PR_TRUE;
++            }
++        }
++    }
++
++    if (ss->doingKEMTLS) {
++        SSL_TRC(3, ("%d: TLS13[%d]: selected KEMTLS authentication",
++                    SSL_GETPID(), ss->fd));
++    } else {
++        SSL_TRC(3, ("%d: TLS13[%d]: selected certificate authentication",
++                    SSL_GETPID(), ss->fd));
++    }
+     SECStatus rv = tls13_SelectServerCert(ss);
+     if (rv != SECSuccess) {
+         return SECFailure;
+@@ -2332,30 +2384,47 @@ tls13_HandleClientKeyShare(sslSocket *ss, TLS13KeyShareEntry *peerShare)
+ 
+     tls13_SetKeyExchangeType(ss, peerShare->group);
+ 
+-    /* Generate our key */
+-    rv = tls13_AddKeyShare(ss, peerShare->group);
+-    if (rv != SECSuccess) {
+-        return rv;
+-    }
++    if (peerShare->group->name == ssl_grp_cecpq3) {
++        SECItem *sharedSecret = NULL;
++        ss->keyShareToSend = NULL;
++        rv = CECPQ3_Encapsulate(&ss->keyShareToSend, &sharedSecret, peerShare->key_exchange.data);
++        if (rv != SECSuccess) {
++            return rv;
++        }
+ 
+-    /* We should have exactly one key share. */
+-    PORT_Assert(!PR_CLIST_IS_EMPTY(&ss->ephemeralKeyPairs));
+-    PORT_Assert(PR_PREV_LINK(&ss->ephemeralKeyPairs) ==
+-                PR_NEXT_LINK(&ss->ephemeralKeyPairs));
++        PK11SlotInfo *slot = PK11_GetBestSlot(CKM_HKDF_DERIVE, NULL);
++        if (!slot) {
++            return SECFailure;
++        }
++        ss->ssl3.hs.dheSecret = PK11_ImportDataKey(slot, CKM_HKDF_DERIVE, PK11_OriginUnwrap, CKA_DERIVE, sharedSecret, NULL);
++        if (ss->ssl3.hs.dheSecret == NULL) {
++            return SECFailure;
++        }
++    } else {
++        /* Generate our key */
++        rv = tls13_AddKeyShare(ss, peerShare->group);
++        if (rv != SECSuccess) {
++            return rv;
++        }
+ 
+-    keyPair = ((sslEphemeralKeyPair *)PR_NEXT_LINK(&ss->ephemeralKeyPairs));
+-    ss->sec.keaKeyBits = SECKEY_PublicKeyStrengthInBits(keyPair->keys->pubKey);
++        /* We should have exactly one key share. */
++        PORT_Assert(!PR_CLIST_IS_EMPTY(&ss->ephemeralKeyPairs));
++        PORT_Assert(PR_PREV_LINK(&ss->ephemeralKeyPairs) ==
++                    PR_NEXT_LINK(&ss->ephemeralKeyPairs));
++
++        keyPair = ((sslEphemeralKeyPair *)PR_NEXT_LINK(&ss->ephemeralKeyPairs));
++        ss->sec.keaKeyBits = SECKEY_PublicKeyStrengthInBits(keyPair->keys->pubKey);
+ 
++        rv = tls13_HandleKeyShare(ss, peerShare, keyPair->keys,
++                                  tls13_GetHash(ss),
++                                  &ss->ssl3.hs.dheSecret);
++    }
+     /* Register the sender */
+     rv = ssl3_RegisterExtensionSender(ss, &ss->xtnData, ssl_tls13_key_share_xtn,
+                                       tls13_ServerSendKeyShareXtn);
+     if (rv != SECSuccess) {
+         return SECFailure; /* Error code set already. */
+     }
+-
+-    rv = tls13_HandleKeyShare(ss, peerShare, keyPair->keys,
+-                              tls13_GetHash(ss),
+-                              &ss->ssl3.hs.dheSecret);
+     return rv; /* Error code set already. */
+ }
+ 
+@@ -2854,6 +2923,9 @@ tls13_SendEncryptedServerSequence(sslSocket *ss)
+         if (rv != SECSuccess) {
+             return SECFailure; /* error code is set. */
+         }
++        if (ss->doingKEMTLS) {
++            return SECSuccess;
++        }
+ 
+         if (tls13_IsSigningWithDelegatedCredential(ss)) {
+             SSL_TRC(3, ("%d: TLS13[%d]: Signing with delegated credential",
+@@ -2901,6 +2973,10 @@ tls13_SendServerHelloSequence(sslSocket *ss)
+     if (rv != SECSuccess) {
+         return SECFailure; /* error code is set. */
+     }
++    if (ss->doingKEMTLS) {
++        PK11_FreeSymKey(ss->ssl3.hs.ephemeralSecretKEMTLS);
++        ss->ssl3.hs.ephemeralSecretKEMTLS = PK11_ReferenceSymKey(ss->ssl3.hs.currentSecret);
++    }
+ 
+     rv = ssl3_SendServerHello(ss);
+     if (rv != SECSuccess) {
+@@ -2934,6 +3010,18 @@ tls13_SendServerHelloSequence(sslSocket *ss)
+         return SECFailure;
+     }
+ 
++    if (ss->doingKEMTLS) {
++        /* We have to wait for the client key_exchange before concluding. */
++        rv = tls13_SetCipherSpec(ss, TrafficKeyHandshake,
++                                 ssl_secret_read, PR_FALSE);
++        if (rv != SECSuccess) {
++            LOG_ERROR(ss, SEC_ERROR_LIBRARY_FAILURE);
++            return SECFailure;
++        }
++        TLS13_SET_HS_STATE(ss, wait_client_key);
++        return SECSuccess;
++    }
++
+     /* Compute the rest of the secrets except for the resumption
+      * and exporter secret. */
+     rv = tls13_ComputeApplicationSecrets(ss);
+@@ -3073,6 +3161,8 @@ tls13_HandleServerHelloPart2(sslSocket *ss, const PRUint8 *savedMsg, PRUint32 sa
+     if (rv != SECSuccess) {
+         return SECFailure; /* error code is set. */
+     }
++    PK11_FreeSymKey(ss->ssl3.hs.ephemeralSecretKEMTLS);
++    ss->ssl3.hs.ephemeralSecretKEMTLS = PK11_ReferenceSymKey(ss->ssl3.hs.currentSecret);
+ 
+     rv = tls13_MaybeHandleEchSignal(ss, savedMsg, savedLength, PR_FALSE);
+     if (rv != SECSuccess) {
+@@ -3120,6 +3210,11 @@ tls13_SetKeyExchangeType(sslSocket *ss, const sslNamedGroupDef *group)
+                 ss->statelessResume ? ssl_kea_dh_psk : ssl_kea_dh;
+             ss->sec.keaType = ssl_kea_dh;
+             break;
++        case ssl_kea_cecpq3:
++            // TODO(goutam): Look into resumption
++            ss->ssl3.hs.kea_def_mutable.exchKeyType = ssl_kea_cecpq3;
++            ss->sec.keaType = ssl_kea_cecpq3;
++            break;
+         default:
+             PORT_Assert(0);
+     }
+@@ -3159,12 +3254,37 @@ tls13_HandleServerKeyShare(sslSocket *ss)
+     }
+ 
+     PORT_Assert(ssl_NamedGroupEnabled(ss, entry->group));
++    if (entry->group->name == ssl_grp_cecpq3) {
++        SECItem privateKey;
++        SECItem *sharedSecret = NULL;
+ 
+-    rv = tls13_HandleKeyShare(ss, entry, keyPair->keys,
+-                              tls13_GetHash(ss),
+-                              &ss->ssl3.hs.dheSecret);
+-    if (rv != SECSuccess)
+-        return SECFailure; /* Error code set by caller. */
++        rv = PK11_ReadRawAttribute(PK11_TypePrivKey, keyPair->keys->privKey, CKA_VALUE, &privateKey);
++        if (rv != SECSuccess) {
++            return rv;
++        }
++
++        rv = CECPQ3_Decapsulate(&sharedSecret, entry->key_exchange.data, privateKey.data);
++        if (rv != SECSuccess) {
++            return rv;
++        }
++
++        PK11SlotInfo *slot = PK11_GetBestSlot(CKM_HKDF_DERIVE, NULL);
++        if (!slot) {
++            rv = SECFailure;
++            return rv;
++        }
++        ss->ssl3.hs.dheSecret = PK11_ImportDataKey(slot, CKM_HKDF_DERIVE, PK11_OriginUnwrap, CKA_DERIVE, sharedSecret, NULL);
++        if (ss->ssl3.hs.dheSecret == NULL) {
++            rv = SECFailure;
++            return rv;
++        }
++    } else {
++        rv = tls13_HandleKeyShare(ss, entry, keyPair->keys,
++                                  tls13_GetHash(ss),
++                                  &ss->ssl3.hs.dheSecret);
++        if (rv != SECSuccess)
++            return SECFailure; /* Error code set by caller. */
++    }
+ 
+     tls13_SetKeyExchangeType(ss, entry->group);
+     ss->sec.keaKeyBits = SECKEY_PublicKeyStrengthInBits(keyPair->keys->pubKey);
+@@ -3493,7 +3613,16 @@ tls13_HandleCertificate(sslSocket *ss, PRUint8 *b, PRUint32 length)
+     }
+     SECKEY_UpdateCertPQG(ss->sec.peerCert);
+ 
+-    return ssl3_AuthCertificate(ss); /* sets ss->ssl3.hs.ws */
++    rv = ssl3_AuthCertificate(ss); /* sets ss->ssl3.hs.ws */
++    if (rv != SECSuccess) {
++        return SECFailure;
++    }
++
++    if(ss->doingKEMTLS) {
++        return tls13_HandleClientKEMTLS(ss);
++    }
++
++    return SECSuccess;
+ }
+ 
+ /* Add context to the hash functions as described in
+@@ -4591,6 +4720,216 @@ loser:
+     return SECFailure;
+ }
+ 
++// TODO(goutam): Reject if support for DCs was not advertised.
++SECStatus
++tls13_HandleClientKEMTLS(sslSocket *ss)
++{
++    sslDelegatedCredential *dc = ss->xtnData.peerDelegCred;
++    SECKEYPublicKey *pubKey = NULL;
++    SECItem *sharedSecretID = NULL;
++    SECStatus rv;
++
++    SSL_TRC(3, ("%d: TLS13[%d]: Authenticating server via KEMTLS.",
++                SSL_GETPID(), ss->fd));
++    PORT_Assert(ss->opt.noLocks || ssl_HaveRecvBufLock(ss));
++    PORT_Assert(ss->opt.noLocks || ssl_HaveSSL3HandshakeLock(ss));
++
++    /* Set the |spki| to the DC public key after verifying the DC.
++     */
++
++    /* NOTE: Normally, DelegatedCredential.cred.expected_cert_verify_algorithm is expected
++     * to match CertificateVerify.scheme, but in KEMTLS, a CertificateVerify message
++     * is not sent.
++     */
++
++    /* Verify the DC has three steps: (1) use the peer's end-entity
++     * certificate to verify DelegatedCredential.signature, (2) check that
++     * the certificate has the correct key usage, and (3) check that the DC
++     * hasn't expired.
++     */
++    rv = tls13_VerifyDelegatedCredential(ss, dc);
++    if (rv != SECSuccess) { /* Calls FATAL_ERROR() */
++        return SECFailure;
++    }
++
++    pubKey = SECKEY_ExtractPublicKey(dc->spki);
++    if (pubKey == NULL) {
++        ssl_MapLowLevelError(SSL_ERROR_EXTRACT_PUBLIC_KEY_FAILURE);
++        return SECFailure;
++    }
++
++    /* Generate the client KEM shared secret and ciphertext. */
++    SECItem *ciphertext = NULL;
++    if ((pubKey->u.cecpq3PublicValue[0] == (ssl_grp_cecpq3 >> 8) &&
++          pubKey->u.cecpq3PublicValue[1] == (ssl_grp_cecpq3 & 0xFF))) {
++        // TODO(xvzcf): This encoding should be removed from cf-go's KEMTLS
++        // implementation.
++        rv = CECPQ3_Encapsulate(&ciphertext, &sharedSecretID, &pubKey->u.cecpq3PublicValue[2]);
++        if (rv != SECSuccess) {
++            return SECFailure;
++        }
++    }
++    else {
++        rv = CECPQ3_Encapsulate(&ciphertext, &sharedSecretID, &pubKey->u.cecpq3PublicValue[0]);
++        if (rv != SECSuccess) {
++            return SECFailure;
++        }
++    }
++
++    /* Send the ciphertext. */
++    rv = tls13_SetCipherSpec(ss, TrafficKeyHandshake, ssl_secret_write, PR_FALSE);
++    if (rv != SECSuccess) {
++        FATAL_ERROR(ss, SSL_ERROR_INIT_CIPHER_SUITE_FAILURE, internal_error);
++        return SECFailure;
++    }
++
++    rv = ssl3_AppendHandshakeHeader(ss, ssl_hs_client_key_exchange, ciphertext->len);
++    if (rv != SECSuccess) {
++        return SECFailure; /* err set by ssl3_AppendHandshake */
++    }
++    rv = ssl3_AppendHandshake(ss, ciphertext->data, ciphertext->len);
++    if (rv != SECSuccess) {
++        return SECFailure;
++    }
++    ssl_GetXmitBufLock(ss); /*******************************/
++    rv = ssl3_FlushHandshake(ss, 0);
++    ssl_ReleaseXmitBufLock(ss); /*******************************/
++    if (rv != SECSuccess) {
++        return SECFailure;
++    }
++
++    /* Generate the new key schedule. */
++    PK11SlotInfo *slot = PK11_GetBestSlot(CKM_HKDF_DERIVE, NULL);
++    if (!slot) {
++        rv = SECFailure;
++        return rv;
++    }
++    ss->ssl3.hs.dheSecret = PK11_ImportDataKey(slot, CKM_HKDF_DERIVE, PK11_OriginUnwrap, CKA_DERIVE, sharedSecretID, NULL);
++    if (ss->ssl3.hs.dheSecret == NULL) {
++        rv = SECFailure;
++        return rv;
++    }
++
++    ss->ssl3.hs.currentSecret = ss->ssl3.hs.ephemeralSecretKEMTLS;
++    rv = tls13_ComputeHandshakeSecret(ss);
++    if (rv != SECSuccess) {
++        return SECFailure;
++    }
++
++    ss->computeKEMTLSHandshakeSecrets = PR_TRUE;
++    rv = tls13_ComputeHandshakeSecrets(ss);
++    if (rv != SECSuccess) {
++        return SECFailure;
++    }
++
++    rv = tls13_SetCipherSpec(ss, TrafficKeyHandshake,
++                             ssl_secret_read, PR_FALSE);
++    if (rv != SECSuccess) {
++        FATAL_ERROR(ss, SSL_ERROR_INIT_CIPHER_SUITE_FAILURE, internal_error);
++        return SECFailure;
++    }
++    rv = tls13_SetCipherSpec(ss, TrafficKeyHandshake,
++                             ssl_secret_write, PR_FALSE);
++    if (rv != SECSuccess) {
++        FATAL_ERROR(ss, SSL_ERROR_INIT_CIPHER_SUITE_FAILURE, internal_error);
++        return SECFailure;
++    }
++
++    ssl_GetXmitBufLock(ss); /*******************************/
++    rv = tls13_SendFinished(ss, ss->ssl3.hs.currentSecret);
++    if (rv != SECSuccess) {
++        return SECFailure; /* err code was set. */
++    }
++
++    rv = ssl3_FlushHandshake(ss, 0);
++    if (rv != SECSuccess) {
++        /* No point in sending an alert here because we're not going to
++         * be able to send it if we couldn't flush the handshake. */
++        return SECFailure;
++    }
++    ssl_ReleaseXmitBufLock(ss); /*******************************/
++
++    SECKEY_DestroyPublicKey(pubKey);
++    return SECSuccess;
++}
++
++static SECStatus
++tls13_HandleServerKEMTLS(sslSocket *ss, PRUint8 *b, PRUint32 length)
++{
++    SECStatus rv;
++    uint8_t ciphertext[768]; // TODO(goutam): Unhardcode
++    SECItem *sharedSecret = NULL;
++    SECItem privateKey;
++
++    PORT_Assert(ss->opt.noLocks || ssl_HaveRecvBufLock(ss));
++    PORT_Assert(ss->opt.noLocks || ssl_HaveSSL3HandshakeLock(ss));
++
++    SSL_TRC(3, ("%d: TLS13[%d]: server KEMTLS handle client_key_exchange",
++                SSL_GETPID(), ss->fd));
++
++    rv = ssl3_ConsumeHandshake(ss, ciphertext, sizeof(ciphertext),
++                               &b, &length);
++    if (rv != SECSuccess) {
++        PORT_SetError(SSL_ERROR_RX_MALFORMED_HANDSHAKE);
++        return SECFailure;
++    }
++    if (length != 0) {
++        FATAL_ERROR(ss, SSL_ERROR_RX_MALFORMED_HANDSHAKE, decode_error);
++        return SECFailure;
++    }
++
++    rv = PK11_ReadRawAttribute(PK11_TypePrivKey, ss->sec.serverCert->delegCredKeyPair->privKey, CKA_VALUE, &privateKey);
++    if (rv != SECSuccess) {
++        return rv;
++    }
++    rv = CECPQ3_Decapsulate(&sharedSecret, ciphertext, privateKey.data);
++    if (rv != SECSuccess) {
++        return SECFailure;
++    }
++
++    /* Generate the new key schedule. */
++    PK11SlotInfo *slot = PK11_GetBestSlot(CKM_HKDF_DERIVE, NULL);
++    if (!slot) {
++        rv = SECFailure;
++        return rv;
++    }
++    ss->ssl3.hs.dheSecret = PK11_ImportDataKey(slot, CKM_HKDF_DERIVE, PK11_OriginUnwrap, CKA_DERIVE, sharedSecret, NULL);
++    if (ss->ssl3.hs.dheSecret == NULL) {
++        rv = SECFailure;
++        return rv;
++    }
++
++    ss->ssl3.hs.currentSecret = ss->ssl3.hs.ephemeralSecretKEMTLS;
++    rv = tls13_ComputeHandshakeSecret(ss);
++    if (rv != SECSuccess) {
++        return SECFailure;
++    }
++
++    ss->computeKEMTLSHandshakeSecrets = PR_TRUE;
++    rv = tls13_ComputeHandshakeSecrets(ss);
++    if (rv != SECSuccess) {
++        return SECFailure;
++    }
++
++    rv = tls13_SetCipherSpec(ss, TrafficKeyHandshake,
++                             ssl_secret_read, PR_FALSE);
++    if (rv != SECSuccess) {
++        FATAL_ERROR(ss, SSL_ERROR_INIT_CIPHER_SUITE_FAILURE, internal_error);
++        return SECFailure;
++    }
++    rv = tls13_SetCipherSpec(ss, TrafficKeyHandshake,
++                             ssl_secret_write, PR_FALSE);
++    if (rv != SECSuccess) {
++        FATAL_ERROR(ss, SSL_ERROR_INIT_CIPHER_SUITE_FAILURE, internal_error);
++        return SECFailure;
++    }
++
++    TLS13_SET_HS_STATE(ss, wait_finished);
++
++    return SECSuccess;
++}
++
++
+ /* Compute the PSK binder hash over:
+  * Client HRR prefix, if present in ss->ssl3.hs.messages or ss->ssl3.hs.echInnerMessages,
+  * |len| bytes of |buf| */
+@@ -4728,9 +5067,27 @@ tls13_ComputeFinished(sslSocket *ss, PK11SymKey *baseKey,
+     CK_MECHANISM_TYPE macAlg = tls13_GetHmacMechanismFromHash(hashType);
+     SECItem param = { siBuffer, NULL, 0 };
+     unsigned int outputLenUint;
+-    const char *label = kHkdfLabelFinishedSecret;
++    const char *label;
+     PK11SymKey *secret = NULL;
+ 
++    if (ss->doingKEMTLS) {
++        if (ss->sec.isServer) {
++            if (sending == PR_TRUE) {
++                label = kHkdfLabelServerFinishedSecret;
++            } else {
++                label = kHkdfLabelClientFinishedSecret;
++            }
++        } else {
++            if (sending == PR_TRUE) {
++                label = kHkdfLabelClientFinishedSecret;
++            } else {
++                label = kHkdfLabelServerFinishedSecret;
++            }
++        }
++    } else {
++        label = kHkdfLabelFinishedSecret;
++    }
++
+     PORT_Assert(baseKey);
+     SSL_TRC(3, ("%d: TLS13[%d]: %s calculate finished",
+                 SSL_GETPID(), ss->fd, SSL_ROLE(ss)));
+@@ -4921,6 +5278,178 @@ tls13_ClientHandleFinished(sslSocket *ss, PRUint8 *b, PRUint32 length)
+     return tls13_SendClientSecondRound(ss);
+ }
+ 
++static SECStatus
++tls13_ClientHandleKEMTLSFinished(sslSocket *ss, PRUint8 *b, PRUint32 length)
++{
++    SECStatus rv;
++    SSL3Hashes hashes;
++
++    PORT_Assert(ss->opt.noLocks || ssl_HaveRecvBufLock(ss));
++    PORT_Assert(ss->opt.noLocks || ssl_HaveSSL3HandshakeLock(ss));
++
++    SSL_TRC(3, ("%d: TLS13[%d]: client KEMTLS handle finished handshake",
++                SSL_GETPID(), ss->fd));
++
++    rv = TLS13_CHECK_HS_STATE(ss, SSL_ERROR_RX_UNEXPECTED_FINISHED, wait_finished);
++    if (rv != SECSuccess) {
++        return SECFailure;
++    }
++    ss->ssl3.hs.endOfFlight = PR_TRUE;
++
++    rv = tls13_ComputeHandshakeHashes(ss, &hashes);
++    if (rv != SECSuccess) {
++        LOG_ERROR(ss, SEC_ERROR_LIBRARY_FAILURE);
++        return SECFailure;
++    }
++
++    rv = tls13_DeriveSecretWrap(ss, ss->ssl3.hs.currentSecret,
++                                kHkdfLabelClient,
++                                kHkdfLabelApplicationTrafficSecret,
++                                keylogLabelClientTrafficSecret,
++                                &ss->ssl3.hs.clientTrafficSecret);
++    if (rv != SECSuccess) {
++        return SECFailure;
++    }
++
++    rv = ssl_HashHandshakeMessage(ss, ssl_hs_finished, b, length);
++    if (rv != SECSuccess) {
++        FATAL_ERROR(ss, SEC_ERROR_LIBRARY_FAILURE, internal_error);
++        return SECFailure;
++    }
++    rv = tls13_VerifyFinished(ss, ssl_hs_finished, ss->ssl3.hs.currentSecret, b, length, &hashes);
++    if (rv != SECSuccess) {
++        return SECFailure;
++    }
++
++    rv = tls13_DeriveSecretWrap(ss, ss->ssl3.hs.currentSecret,
++                                kHkdfLabelServer,
++                                kHkdfLabelApplicationTrafficSecret,
++                                keylogLabelServerTrafficSecret,
++                                &ss->ssl3.hs.serverTrafficSecret);
++    if (rv != SECSuccess) {
++        FATAL_ERROR(ss, SEC_ERROR_LIBRARY_FAILURE, internal_error);
++        return SECFailure;
++    }
++    rv = tls13_DeriveSecretWrap(ss, ss->ssl3.hs.currentSecret,
++                                NULL, kHkdfLabelExporterMasterSecret,
++                                keylogLabelExporterSecret,
++                                &ss->ssl3.hs.exporterSecret);
++    if (rv != SECSuccess) {
++        FATAL_ERROR(ss, SEC_ERROR_LIBRARY_FAILURE, internal_error);
++        return SECFailure;
++    }
++
++    rv = tls13_SetCipherSpec(ss, TrafficKeyApplicationData,
++                             ssl_secret_read, PR_FALSE);
++    if (rv != SECSuccess) {
++        FATAL_ERROR(ss, SEC_ERROR_LIBRARY_FAILURE, internal_error);
++        return SECFailure;
++    }
++    rv = tls13_SetCipherSpec(ss, TrafficKeyApplicationData,
++                             ssl_secret_write, PR_FALSE);
++    if (rv != SECSuccess) {
++        PORT_SetError(SEC_ERROR_LIBRARY_FAILURE);
++        return SECFailure;
++    }
++
++    rv = tls13_ComputeFinalSecrets(ss);
++    if (rv != SECSuccess) {
++        return SECFailure;
++    }
++
++    /* The handshake is now finished */
++    return tls13_FinishHandshake(ss);
++}
++
++static SECStatus
++tls13_ServerHandleKEMTLSFinished(sslSocket *ss, PRUint8 *b, PRUint32 length)
++{
++    SECStatus rv;
++    SSL3Hashes hashes;
++
++    PORT_Assert(ss->opt.noLocks || ssl_HaveRecvBufLock(ss));
++    PORT_Assert(ss->opt.noLocks || ssl_HaveSSL3HandshakeLock(ss));
++
++    SSL_TRC(3, ("%d: TLS13[%d]: server KEMTLS handle finished handshake",
++                SSL_GETPID(), ss->fd));
++
++    rv = TLS13_CHECK_HS_STATE(ss, SSL_ERROR_RX_UNEXPECTED_FINISHED, wait_finished);
++    if (rv != SECSuccess) {
++        return SECFailure;
++    }
++
++    rv = tls13_ComputeHandshakeHashes(ss, &hashes);
++    if (rv != SECSuccess) {
++        LOG_ERROR(ss, SEC_ERROR_LIBRARY_FAILURE);
++        return SECFailure;
++    }
++
++    rv = tls13_VerifyFinished(ss, ssl_hs_finished, ss->ssl3.hs.currentSecret, b, length, &hashes);
++    if (rv != SECSuccess) {
++        return SECFailure;
++    }
++
++    rv = ssl_HashHandshakeMessage(ss, ssl_hs_finished, b, length);
++    if (rv != SECSuccess) {
++        FATAL_ERROR(ss, SEC_ERROR_LIBRARY_FAILURE, internal_error);
++        return SECFailure;
++    }
++
++    rv = tls13_DeriveSecretWrap(ss, ss->ssl3.hs.currentSecret,
++                                kHkdfLabelClient,
++                                kHkdfLabelApplicationTrafficSecret,
++                                keylogLabelClientTrafficSecret,
++                                &ss->ssl3.hs.clientTrafficSecret);
++    if (rv != SECSuccess) {
++        return SECFailure;
++    }
++
++    /* Write Server Finished and derive new keys */
++    ssl_GetXmitBufLock(ss); /*******************************/
++    rv = tls13_SendFinished(ss, ss->ssl3.hs.currentSecret);
++    if (rv != SECSuccess) {
++        return SECFailure; /* err code was set. */
++    }
++
++    rv = ssl3_FlushHandshake(ss, 0);
++    if (rv != SECSuccess) {
++        /* No point in sending an alert here because we're not going to
++         * be able to send it if we couldn't flush the handshake. */
++        return SECFailure;
++    }
++    ssl_ReleaseXmitBufLock(ss); /*******************************/
++
++    rv = tls13_DeriveSecretWrap(ss, ss->ssl3.hs.currentSecret,
++                                kHkdfLabelServer,
++                                kHkdfLabelApplicationTrafficSecret,
++                                keylogLabelServerTrafficSecret,
++                                &ss->ssl3.hs.serverTrafficSecret);
++    if (rv != SECSuccess) {
++        return SECFailure;
++    }
++
++    rv = tls13_SetCipherSpec(ss, TrafficKeyApplicationData,
++                             ssl_secret_read, PR_FALSE);
++    if (rv != SECSuccess) {
++        FATAL_ERROR(ss, SEC_ERROR_LIBRARY_FAILURE, internal_error);
++        return SECFailure;
++    }
++    rv = tls13_SetCipherSpec(ss, TrafficKeyApplicationData,
++                             ssl_secret_write, PR_FALSE);
++    if (rv != SECSuccess) {
++        PORT_SetError(SEC_ERROR_LIBRARY_FAILURE);
++        return SECFailure;
++    }
++
++    rv = tls13_ComputeFinalSecrets(ss);
++    if (rv != SECSuccess) {
++        return SECFailure;
++    }
++
++    /* The handshake is now finished */
++    return tls13_FinishHandshake(ss);
++}
++
+ static SECStatus
+ tls13_ServerHandleFinished(sslSocket *ss, PRUint8 *b, PRUint32 length)
+ {
+@@ -6400,4 +6929,4 @@ tls13_MaybeTls13(sslSocket *ss)
+     }
+ 
+     return PR_FALSE;
+-}
+\ No newline at end of file
++}
+diff --git a/lib/ssl/tls13exthandle.c b/lib/ssl/tls13exthandle.c
+index 6acdf2473..907f20b06 100644
+--- a/lib/ssl/tls13exthandle.c
++++ b/lib/ssl/tls13exthandle.c
+@@ -83,6 +83,8 @@ tls13_SizeOfKeyShareEntry(const SECKEYPublicKey *pubKey)
+             return 2 + 2 + pubKey->u.ec.publicValue.len;
+         case dhKey:
+             return 2 + 2 + pubKey->u.dh.prime.len;
++        case cecpq3Key:
++            return 2 + 2 + CECPQ3_PUBLICKEYBYTES;
+         default:
+             PORT_Assert(0);
+     }
+@@ -111,6 +113,17 @@ tls13_EncodeKeyShareEntry(sslBuffer *buf, SSLNamedGroup group,
+         case dhKey:
+             rv = ssl_AppendPaddedDHKeyShare(buf, pubKey, PR_FALSE);
+             break;
++        case cecpq3Key:
++        {
++            SECItem pubKeyRaw;
++            rv = PK11_ReadRawAttribute(PK11_TypePubKey, pubKey, CKA_VALUE, &pubKeyRaw);
++            if (rv != SECSuccess)
++                return rv;
++            rv = sslBuffer_Append(buf, pubKeyRaw.data, pubKeyRaw.len);
++            if (rv != SECSuccess)
++                return rv;
++            break;
++        }
+         default:
+             PORT_Assert(0);
+             PORT_SetError(SEC_ERROR_LIBRARY_FAILURE);
+@@ -362,17 +375,29 @@ tls13_ServerSendKeyShareXtn(const sslSocket *ss, TLSExtensionData *xtnData,
+     SECStatus rv;
+     sslEphemeralKeyPair *keyPair;
+ 
+-    /* There should be exactly one key share. */
+-    PORT_Assert(!PR_CLIST_IS_EMPTY(&ss->ephemeralKeyPairs));
+-    PORT_Assert(PR_PREV_LINK(&ss->ephemeralKeyPairs) ==
+-                PR_NEXT_LINK(&ss->ephemeralKeyPairs));
++    if (ss->sec.keaGroup->keaType == ssl_kea_cecpq3) {
++        rv = sslBuffer_AppendNumber(buf, ssl_grp_cecpq3, 2);
++        if (rv != SECSuccess)
++            return SECFailure;
++        rv = sslBuffer_AppendNumber(buf, ss->keyShareToSend->len, 2);
++        if (rv != SECSuccess)
++            return SECFailure;
++        rv = sslBuffer_Append(buf, ss->keyShareToSend->data, ss->keyShareToSend->len);
++        if (rv != SECSuccess)
++            return SECFailure;
++    } else {
++        /* There should be exactly one key share. */
++        PORT_Assert(!PR_CLIST_IS_EMPTY(&ss->ephemeralKeyPairs));
++        PORT_Assert(PR_PREV_LINK(&ss->ephemeralKeyPairs) ==
++                    PR_NEXT_LINK(&ss->ephemeralKeyPairs));
+ 
+-    keyPair = (sslEphemeralKeyPair *)PR_NEXT_LINK(&ss->ephemeralKeyPairs);
++        keyPair = (sslEphemeralKeyPair *)PR_NEXT_LINK(&ss->ephemeralKeyPairs);
+ 
+-    rv = tls13_EncodeKeyShareEntry(buf, keyPair->group->name,
+-                                   keyPair->keys->pubKey);
+-    if (rv != SECSuccess) {
+-        return SECFailure;
++        rv = tls13_EncodeKeyShareEntry(buf, keyPair->group->name,
++                                       keyPair->keys->pubKey);
++        if (rv != SECSuccess) {
++            return SECFailure;
++        }
+     }
+ 
+     *added = PR_TRUE;
+@@ -1286,17 +1311,22 @@ tls13_ClientSendDelegatedCredentialsXtn(const sslSocket *ss,
+      * schemes. */
+     SSLSignatureScheme filtered[MAX_SIGNATURE_SCHEMES] = { 0 };
+     unsigned int filteredCount = 0;
++
++    /* We only support KEM keys in DCs. */
++    filtered[0] = ssl_kemtls_with_cecpq3;
++
+     SECStatus rv = ssl3_FilterSigAlgs(ss, ss->vrange.max,
+                                       PR_TRUE /* disableRsae */,
+                                       PR_FALSE /* forCert */,
+                                       MAX_SIGNATURE_SCHEMES,
+-                                      filtered,
++                                      &filtered[1],
+                                       &filteredCount);
+     if (rv != SECSuccess) {
+         return SECFailure;
+     }
+ 
+     /* If no schemes available for the DC extension, don't send it. */
++    filteredCount += 1;
+     if (!filteredCount) {
+         return SECSuccess;
+     }
+diff --git a/lib/ssl/tls13subcerts.c b/lib/ssl/tls13subcerts.c
+index 1fd79ae20..440b16afd 100644
+--- a/lib/ssl/tls13subcerts.c
++++ b/lib/ssl/tls13subcerts.c
+@@ -225,12 +225,13 @@ tls13_MaybeSetDelegatedCredential(sslSocket *ss)
+         return SECFailure;
+     }
+ 
+-    if (!ssl_SignatureSchemeEnabled(ss, scheme) ||
+-        !ssl_CanUseSignatureScheme(scheme,
+-                                   ss->xtnData.delegCredSigSchemes,
+-                                   ss->xtnData.numDelegCredSigSchemes,
+-                                   PR_FALSE /* requireSha1 */,
+-                                   doesRsaPss)) {
++    if (scheme != ssl_kemtls_with_cecpq3 &&
++        (!ssl_SignatureSchemeEnabled(ss, scheme) ||
++         !ssl_CanUseSignatureScheme(scheme,
++                                    ss->xtnData.delegCredSigSchemes,
++                                    ss->xtnData.numDelegCredSigSchemes,
++                                    PR_FALSE /* requireSha1 */,
++                                    doesRsaPss))) {
+         return SECSuccess;
+     }
+ 
+@@ -649,6 +650,14 @@ tls13_MakeDcSpki(const SECKEYPublicKey *dcPub, SSLSignatureScheme dcCertVerifyAl
+             return SECKEY_CreateSubjectPublicKeyInfo(dcPub);
+         }
+ 
++        case cecpq3Key: {
++            if (dcCertVerifyAlg != ssl_kemtls_with_cecpq3) {
++                PORT_SetError(SSL_ERROR_INCORRECT_SIGNATURE_ALGORITHM);
++                return NULL;
++            }
++            return SECKEY_CreateSubjectPublicKeyInfo(dcPub);
++        }
++
+         default:
+             break;
+     }
+diff --git a/lib/util/pkcs11n.h b/lib/util/pkcs11n.h
+index cb7672048..14387ae62 100644
+--- a/lib/util/pkcs11n.h
++++ b/lib/util/pkcs11n.h
+@@ -55,6 +55,8 @@
+ 
+ #define CKK_NSS_CHACHA20 (CKK_NSS + 4)
+ 
++#define CKK_NSS_CECPQ3 (CKK_NSS + 5)
++
+ /*
+  * NSS-defined certificate types
+  *
+@@ -258,6 +260,9 @@
+ #define CKM_NSS_SP800_108_FEEDBACK_KDF_DERIVE_DATA (CKM_NSS + 43)
+ #define CKM_NSS_SP800_108_DOUBLE_PIPELINE_KDF_DERIVE_DATA (CKM_NSS + 44)
+ 
++/* CECPQ3 */
++#define CKM_NSS_CECPQ3_KEY_GEN (CKM_NSS + 45)
++
+ /*
+  * HISTORICAL:
+  * Do not attempt to use these. They are only used by NSS's internal
+diff --git a/lib/util/secoid.c b/lib/util/secoid.c
+index b10f859fb..25fcaed49 100644
+--- a/lib/util/secoid.c
++++ b/lib/util/secoid.c
+@@ -602,6 +602,10 @@ CONST_OID evIncorporationCountry[] = { EV_NAME_ATTRIBUTE, 3 };
+  */
+ CONST_OID curve25519[] = { 0x2B, 0x06, 0x01, 0x04, 0x01, 0xDA, 0x47, 0x0F, 0x01 };
+ 
++/* https://github.com/cloudflare/go/blob/cf-pq-kemtls/src/crypto/x509/x509.go#L484 */
++/* 1.3.6.1.4.1.44363.45.11 */
++CONST_OID kemtls_with_cecpq3[] = { 0x2B, 0x06, 0x01, 0x04, 0x01, 0x82, 0xDA, 0x4B, 0x2D, 0x0B };
++
+ #define OI(x)                                  \
+     {                                          \
+         siDEROID, (unsigned char *)x, sizeof x \
+@@ -1795,6 +1799,11 @@ const static SECOidData oids[SEC_OID_TOTAL] = {
+        SEC_OID_EXT_KEY_USAGE_IPSEC_USER,
+        "IPsec User",
+        CKM_INVALID_MECHANISM, INVALID_CERT_EXTENSION),
++
++    OD(kemtls_with_cecpq3,
++       SEC_OID_KEMTLS_WITH_CECPQ3,
++       "KEMTLS With CECPQ3",
++       CKM_INVALID_MECHANISM, INVALID_CERT_EXTENSION),
+ };
+ 
+ /* PRIVATE EXTENDED SECOID Table
+diff --git a/lib/util/secoidt.h b/lib/util/secoidt.h
+index 2b7eb2139..9c561a1df 100644
+--- a/lib/util/secoidt.h
++++ b/lib/util/secoidt.h
+@@ -502,6 +502,8 @@ typedef enum {
+     SEC_OID_EXT_KEY_USAGE_IPSEC_TUNNEL = 362,
+     SEC_OID_EXT_KEY_USAGE_IPSEC_USER = 363,
+ 
++    SEC_OID_KEMTLS_WITH_CECPQ3 = 364,
++
+     SEC_OID_TOTAL
+ } SECOidTag;
+ 

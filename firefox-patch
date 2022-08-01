@@ -1,0 +1,44 @@
+diff -r 5a3f8ede374b security/manager/ssl/nsNSSCallbacks.cpp
+--- a/security/manager/ssl/nsNSSCallbacks.cpp	Tue Jul 26 11:04:38 2022 +0000
++++ b/security/manager/ssl/nsNSSCallbacks.cpp	Mon Aug 01 10:23:38 2022 +0200
+@@ -612,6 +612,9 @@
+ nsCString getKeaGroupName(uint32_t aKeaGroup) {
+   nsCString groupName;
+   switch (aKeaGroup) {
++    case ssl_grp_cecpq3:
++      groupName = "CECPQ3"_ns;
++      break;
+     case ssl_grp_ec_secp256r1:
+       groupName = "P256"_ns;
+       break;
+@@ -649,6 +652,9 @@
+ nsCString getSignatureName(uint32_t aSignatureScheme) {
+   nsCString signatureName;
+   switch (aSignatureScheme) {
++    case ssl_kemtls_with_cecpq3:
++      signatureName = "KEMTLS-CECPQ3"_ns;
++      break;
+     case ssl_sig_none:
+       signatureName = "none"_ns;
+       break;
+@@ -1194,6 +1200,8 @@
+             AccumulateECCCurve(Telemetry::SSL_KEA_ECDHE_CURVE_FULL,
+                                channelInfo.keaKeyBits);
+             break;
++          case ssl_kea_cecpq3:
++            break;
+           default:
+             MOZ_CRASH("impossible KEA");
+             break;
+diff -r 5a3f8ede374b security/manager/ssl/nsNSSIOLayer.cpp
+--- a/security/manager/ssl/nsNSSIOLayer.cpp	Tue Jul 26 11:04:38 2022 +0000
++++ b/security/manager/ssl/nsNSSIOLayer.cpp	Mon Aug 01 10:23:38 2022 +0200
+@@ -2009,7 +2009,7 @@
+   // Please change getKeaGroupName in nsNSSCallbacks.cpp when changing the list
+   // here.
+   const SSLNamedGroup namedGroups[] = {
+-      ssl_grp_ec_curve25519, ssl_grp_ec_secp256r1, ssl_grp_ec_secp384r1,
++      ssl_grp_cecpq3, ssl_grp_ec_curve25519, ssl_grp_ec_secp256r1, ssl_grp_ec_secp384r1,
+       ssl_grp_ec_secp521r1,  ssl_grp_ffdhe_2048,   ssl_grp_ffdhe_3072};
+   if (SECSuccess != SSL_NamedGroupConfig(fd, namedGroups,
+                                          mozilla::ArrayLength(namedGroups))) {
