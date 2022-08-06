@@ -1,17 +1,17 @@
 diff --git a/cmd/lib/secutil.c b/cmd/lib/secutil.c
-index d9270ed92..30a1d2468 100644
+index d9270ed92..d11f49ef0 100644
 --- a/cmd/lib/secutil.c
 +++ b/cmd/lib/secutil.c
-@@ -4186,6 +4186,9 @@ groupNameToNamedGroup(char *name)
+@@ -4205,6 +4205,9 @@ groupNameToNamedGroup(char *name)
+             return ssl_grp_ffdhe_8192;
          }
      }
-     if (PL_strlen(name) == 6) {
-+        if (!strncmp(name, "CECPQ3", 6)) {
-+            return ssl_grp_cecpq3;
-+        }
-         if (!strncmp(name, "x25519", 6)) {
-             return ssl_grp_ec_curve25519;
-         }
++    if (!strncmp(name, "X25519Kyber512Draft00", 21)) {
++        return ssl_grp_x25519Kyber512Draft00;
++    }
+ 
+     return ssl_grp_none;
+ }
 diff --git a/cmd/selfserv/selfserv.c b/cmd/selfserv/selfserv.c
 index d26851d98..4c30c52e5 100644
 --- a/cmd/selfserv/selfserv.c
@@ -21,7 +21,7 @@ index d26851d98..4c30c52e5 100644
          "-I comma separated list of enabled groups for TLS key exchange.\n"
          "   The following values are valid:\n"
 -        "   P256, P384, P521, x25519, FF2048, FF3072, FF4096, FF6144, FF8192\n"
-+        "   CECPQ3, P256, P384, P521, x25519, FF2048, FF3072, FF4096, FF6144, FF8192\n"
++        "   X25519Kyber512Draft00, P256, P384, P521, x25519, FF2048, FF3072, FF4096, FF6144, FF8192\n"
          "-J comma separated list of enabled signature schemes in preference order.\n"
          "   The following values are valid:\n"
          "     rsa_pkcs1_sha1, rsa_pkcs1_sha256, rsa_pkcs1_sha384, rsa_pkcs1_sha512,\n"
@@ -34,24 +34,24 @@ index cbf824ec1..596dc2e2c 100644
      fprintf(stderr, "%-20s Comma separated list of enabled groups for TLS key exchange.\n"
                      "%-20s The following values are valid:\n"
 -                    "%-20s P256, P384, P521, x25519, FF2048, FF3072, FF4096, FF6144, FF8192\n",
-+                    "%-20s CECPQ3, P256, P384, P521, x25519, FF2048, FF3072, FF4096, FF6144, FF8192\n",
++                    "%-20s X25519Kyber512Draft00, P256, P384, P521, x25519, FF2048, FF3072, FF4096, FF6144, FF8192\n",
              "-I", "", "");
      fprintf(stderr, "%-20s Comma separated list of signature schemes in preference order.\n"
                      "%-20s The following values are valid:\n"
 diff --git a/gtests/pk11_gtest/pk11_import_unittest.cc b/gtests/pk11_gtest/pk11_import_unittest.cc
-index 3dc7983f8..ec9e8cd95 100644
+index 3dc7983f8..56197e09a 100644
 --- a/gtests/pk11_gtest/pk11_import_unittest.cc
 +++ b/gtests/pk11_gtest/pk11_import_unittest.cc
 @@ -91,6 +91,7 @@ class Pk11KeyImportTestBase : public ::testing::Test {
          return pub_key->u.ec.publicValue;
        case fortezzaKey: /* depricated */
        case nullKey:
-+      case cecpq3Key:
++      case x25519Kyber512Draft00Key:
          /* didn't use default here so we can catch new key types at compile time
           */
          break;
 diff --git a/lib/cryptohi/keythi.h b/lib/cryptohi/keythi.h
-index f6170bb78..3ba7ac05d 100644
+index f6170bb78..213c17c46 100644
 --- a/lib/cryptohi/keythi.h
 +++ b/lib/cryptohi/keythi.h
 @@ -33,7 +33,8 @@ typedef enum {
@@ -60,12 +60,12 @@ index f6170bb78..3ba7ac05d 100644
      rsaPssKey = 7,
 -    rsaOaepKey = 8
 +    rsaOaepKey = 8,
-+    cecpq3Key = 9
++    x25519Kyber512Draft00Key = 9
  } KeyType;
  
  /*
 diff --git a/lib/freebl/blapi.h b/lib/freebl/blapi.h
-index 94fd80222..cbf6dea68 100644
+index 94fd80222..e0501c563 100644
 --- a/lib/freebl/blapi.h
 +++ b/lib/freebl/blapi.h
 @@ -1791,6 +1791,14 @@ extern SECStatus EC_CopyParams(PLArenaPool *arena, ECParams *dstParams,
@@ -73,191 +73,29 @@ index 94fd80222..cbf6dea68 100644
  extern int EC_GetPointSize(const ECParams *params);
  
 +/******************************************************
-+** CECPQ3 algorithms
++** X25519Kyber512Draft00 algorithms
 +*/
 +
-+extern SECStatus CECPQ3_Generate(SECItem **publicKey, SECItem **secretKey);
-+extern SECStatus CECPQ3_Encapsulate(SECItem **ciphertext, SECItem **sharedSecret, SECItem *publicKey);
-+extern SECStatus CECPQ3_Decapsulate(SECItem **sharedSecret, SECItem *ciphertext, SECItem *secretKey);
++extern SECStatus X25519Kyber512Draft00_Generate(SECItem **publicKey, SECItem **secretKey);
++extern SECStatus X25519Kyber512Draft00_Encapsulate(SECItem **ciphertext, SECItem **sharedSecret, SECItem *publicKey);
++extern SECStatus X25519Kyber512Draft00_Decapsulate(SECItem **sharedSecret, SECItem *ciphertext, SECItem *secretKey);
 +
  SEC_END_PROTOS
  
  #endif /* _BLAPI_H_ */
 diff --git a/lib/freebl/blapit.h b/lib/freebl/blapit.h
-index 0054e17b8..939d30ece 100644
+index 0054e17b8..4e8a55632 100644
 --- a/lib/freebl/blapit.h
 +++ b/lib/freebl/blapit.h
 @@ -228,6 +228,8 @@ typedef int __BLAPI_DEPRECATED __attribute__((deprecated));
   * to use a random value for the nonce in TLS. */
  #define GCMIV_RANDOM_BIRTHDAY_BITS 64
  
-+#define CECPQ3_PUBLICKEYBYTES 800
++#define X25519KYBER512DRAFT00_PUBLICKEYBYTES 800
 +
  /***************************************************************************
  ** Opaque objects
  */
-diff --git a/lib/freebl/cecpq3.c b/lib/freebl/cecpq3.c
-new file mode 100644
-index 000000000..bfc48ef62
---- /dev/null
-+++ b/lib/freebl/cecpq3.c
-@@ -0,0 +1,156 @@
-+/* This Source Code Form is subject to the terms of the Mozilla Public
-+ * License, v. 2.0. If a copy of the MPL was not distributed with this
-+ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
-+
-+#ifdef FREEBL_NO_DEPEND
-+#include "stubs.h"
-+#endif
-+
-+#include "blapi.h"
-+#include "secerr.h"
-+#include "secitem.h"
-+#include "ecl-priv.h"
-+#include "ecl-curve.h"
-+
-+#include "kyber512/api.h"
-+
-+#define CHECK_OK(func) \
-+    if (func == NULL)  \
-+    goto cleanup
-+#define CHECK_SEC_OK(func)         \
-+    if (SECSuccess != (rv = func)) \
-+    return SECFailure
-+
-+// TODO(goutam): Generate the classical key
-+// Classical first, then PQ
-+
-+static SECStatus
-+gf_populate_params_bytes(ECCurveName name, ECFieldType field_type, ECParams *params)
-+{
-+    SECStatus rv = SECFailure;
-+    const ECCurveBytes *curveParams;
-+
-+    if ((name < ECCurve_noName) || (name > ECCurve_pastLastCurve))
-+        goto cleanup;
-+    params->name = name;
-+    curveParams = ecCurve_map[params->name];
-+    CHECK_OK(curveParams);
-+    params->fieldID.size = curveParams->size;
-+    params->fieldID.type = field_type;
-+    if (field_type != ec_field_GFp && field_type != ec_field_plain) {
-+        return SECFailure;
-+    }
-+    params->fieldID.u.prime.len = curveParams->scalarSize;
-+    params->fieldID.u.prime.data = (unsigned char *)curveParams->irr;
-+    params->curve.a.len = curveParams->scalarSize;
-+    params->curve.a.data = (unsigned char *)curveParams->curvea;
-+    params->curve.b.len = curveParams->scalarSize;
-+    params->curve.b.data = (unsigned char *)curveParams->curveb;
-+    params->base.len = curveParams->pointSize;
-+    params->base.data = (unsigned char *)curveParams->base;
-+    params->order.len = curveParams->scalarSize;
-+    params->order.data = (unsigned char *)curveParams->order;
-+    params->cofactor = curveParams->cofactor;
-+
-+    rv = SECSuccess;
-+
-+cleanup:
-+    return rv;
-+}
-+
-+SECStatus
-+CECPQ3_Generate(SECItem **publicKey, SECItem **secretKey)
-+{
-+    SECStatus rv = SECFailure;
-+
-+    ECParams *params;
-+    PLArenaPool *arena;
-+    if (!(arena = PORT_NewArena(NSS_FREEBL_DEFAULT_CHUNKSIZE)))
-+        return SECFailure;
-+    params = (ECParams *)PORT_ArenaZAlloc(arena, sizeof(ECParams));
-+    if (!params) {
-+        PORT_FreeArena(arena, PR_TRUE);
-+        return SECFailure;
-+    }
-+
-+    CHECK_SEC_OK(gf_populate_params_bytes(ECCurve25519, ec_field_plain, params));
-+
-+    ECPrivateKey *x25519Key = NULL;
-+    CHECK_SEC_OK(EC_NewKey(params, &x25519Key));
-+
-+    *publicKey = SECITEM_AllocItem(NULL, *publicKey, x25519Key->publicValue.len + PQCLEAN_KYBER512_CLEAN_CRYPTO_PUBLICKEYBYTES);
-+    if (*publicKey == NULL) {
-+        PORT_SetError(SEC_ERROR_NO_MEMORY);
-+        return SECFailure;
-+    }
-+
-+    *secretKey = SECITEM_AllocItem(NULL, *secretKey, x25519Key->privateValue.len + PQCLEAN_KYBER512_CLEAN_CRYPTO_SECRETKEYBYTES);
-+    if (*secretKey == NULL) {
-+        PORT_SetError(SEC_ERROR_NO_MEMORY);
-+        return SECFailure;
-+    }
-+
-+    /* Write out classical part first */
-+    memcpy((*publicKey)->data, x25519Key->publicValue.data, 32);
-+    memcpy((*secretKey)->data, x25519Key->privateValue.data, 32);
-+
-+    /* Generate PQ key */
-+    int rc = PQCLEAN_KYBER512_CLEAN_crypto_kem_keypair((*publicKey)->data + x25519Key->publicValue.len,
-+                                                       (*secretKey)->data + x25519Key->privateValue.len);
-+    if (rc != 0) {
-+        return SECFailure;
-+    }
-+
-+    return SECSuccess;
-+}
-+
-+SECStatus
-+CECPQ3_Encapsulate(SECItem **ciphertext, SECItem **sharedSecret, SECItem *publicKey)
-+{
-+    SECStatus rv = SECFailure;
-+    ECParams params;
-+    CHECK_SEC_OK(gf_populate_params_bytes(ECCurve25519, ec_field_plain, &params));
-+    ECPrivateKey *x25519Key;
-+    CHECK_SEC_OK(EC_NewKey(&params, &x25519Key));
-+
-+    *ciphertext = SECITEM_AllocItem(NULL, *ciphertext, x25519Key->publicValue.len + PQCLEAN_KYBER512_CLEAN_CRYPTO_CIPHERTEXTBYTES);
-+    if (*ciphertext == NULL) {
-+        PORT_SetError(SEC_ERROR_NO_MEMORY);
-+        return SECFailure;
-+    }
-+
-+    *sharedSecret = SECITEM_AllocItem(NULL, *sharedSecret, 32 + PQCLEAN_KYBER512_CLEAN_CRYPTO_BYTES);
-+    if (*sharedSecret == NULL) {
-+        PORT_SetError(SEC_ERROR_NO_MEMORY);
-+        return SECFailure;
-+    }
-+
-+    ec_Curve25519_mul((*sharedSecret)->data, x25519Key->privateValue.data, publicKey->data);
-+
-+    memcpy((*ciphertext)->data, x25519Key->publicValue.data, 32);
-+    int rc = PQCLEAN_KYBER512_CLEAN_crypto_kem_enc((*ciphertext)->data + x25519Key->publicValue.len, (*sharedSecret)->data + 32, publicKey->data);
-+    if (rc != 0) {
-+        return SECFailure;
-+    }
-+
-+    return SECSuccess;
-+}
-+
-+SECStatus
-+CECPQ3_Decapsulate(SECItem **sharedSecret, SECItem *ciphertext, SECItem *secretKey)
-+{
-+    *sharedSecret = SECITEM_AllocItem(NULL, *sharedSecret, 32 + PQCLEAN_KYBER512_CLEAN_CRYPTO_BYTES);
-+    if (*sharedSecret == NULL) {
-+        PORT_SetError(SEC_ERROR_NO_MEMORY);
-+        return SECFailure;
-+    }
-+    ec_Curve25519_mul((*sharedSecret)->data, secretKey->data, ciphertext->data);
-+
-+
-+    int rc = PQCLEAN_KYBER512_CLEAN_crypto_kem_dec((*sharedSecret)->data + 32, ciphertext->data + 32, secretKey->data + 32);
-+    if (rc != 0) {
-+        return SECFailure;
-+    }
-+
-+    return SECSuccess;
-+}
 diff --git a/lib/freebl/freebl.gyp b/lib/freebl/freebl.gyp
 index 72e1b9b73..eb41f4afa 100644
 --- a/lib/freebl/freebl.gyp
@@ -271,7 +109,7 @@ index 72e1b9b73..eb41f4afa 100644
        'verified/kremlin/include',
        'verified/kremlin/kremlib/dist/minimal',
 diff --git a/lib/freebl/freebl_base.gypi b/lib/freebl/freebl_base.gypi
-index 34b6b3c81..b60730745 100644
+index 34b6b3c81..7bf3d341e 100644
 --- a/lib/freebl/freebl_base.gypi
 +++ b/lib/freebl/freebl_base.gypi
 @@ -61,6 +61,18 @@
@@ -289,7 +127,7 @@ index 34b6b3c81..b60730745 100644
 +    'kyber512/verify.c',
 +    'kyber512/fips202.c',
 +    'kyber512/randombytes.c',
-+    'cecpq3.c',
++    'x25519Kyber512.c',
    ],
    'conditions': [
      [ 'OS=="linux" or OS=="android"', {
@@ -3482,7 +3320,7 @@ index 000000000..47c5579a6
 +
 +#endif
 diff --git a/lib/freebl/ldvector.c b/lib/freebl/ldvector.c
-index ac3b862b5..f1c2593f5 100644
+index ac3b862b5..d80e5b58e 100644
 --- a/lib/freebl/ldvector.c
 +++ b/lib/freebl/ldvector.c
 @@ -376,9 +376,12 @@ static const struct FREEBLVectorStr vector =
@@ -3493,14 +3331,14 @@ index ac3b862b5..f1c2593f5 100644
 +      ChaCha20_DestroyContext,
  
        /* End of version 3.025 */
-+      CECPQ3_Generate,
-+      CECPQ3_Encapsulate,
-+      CECPQ3_Decapsulate
++      X25519Kyber512Draft00_Generate,
++      X25519Kyber512Draft00_Encapsulate,
++      X25519Kyber512Draft00_Decapsulate
      };
  
  const FREEBLVector*
 diff --git a/lib/freebl/loader.c b/lib/freebl/loader.c
-index 692a8831b..47b8a6dc8 100644
+index 692a8831b..2291974bc 100644
 --- a/lib/freebl/loader.c
 +++ b/lib/freebl/loader.c
 @@ -2446,3 +2446,27 @@ CMAC_Destroy(CMACContext *ctx, PRBool free_it)
@@ -3509,30 +3347,30 @@ index 692a8831b..47b8a6dc8 100644
  }
 +
 +SECStatus
-+CECPQ3_Generate(SECItem **publicKey, SECItem **secretKey)
++X25519Kyber512Draft00_Generate(SECItem **publicKey, SECItem **secretKey)
 +{
 +    if (!vector && PR_SUCCESS != freebl_RunLoaderOnce())
 +        return SECFailure;
-+    return (vector->p_CECPQ3_Generate)(publicKey, secretKey);
++    return (vector->p_X25519Kyber512Draft00_Generate)(publicKey, secretKey);
 +}
 +
 +SECStatus
-+CECPQ3_Encapsulate(SECItem **ciphertext, SECItem **sharedSecret, SECItem *publicKey)
++X25519Kyber512Draft00_Encapsulate(SECItem **ciphertext, SECItem **sharedSecret, SECItem *publicKey)
 +{
 +    if (!vector && PR_SUCCESS != freebl_RunLoaderOnce())
 +        return SECFailure;
-+    return (vector->p_CECPQ3_Encapsulate)(ciphertext, sharedSecret, publicKey);
++    return (vector->p_X25519Kyber512Draft00_Encapsulate)(ciphertext, sharedSecret, publicKey);
 +}
 +
 +SECStatus
-+CECPQ3_Decapsulate(SECItem **sharedSecret, SECItem *ciphertext, SECItem *secretKey)
++X25519Kyber512Draft00_Decapsulate(SECItem **sharedSecret, SECItem *ciphertext, SECItem *secretKey)
 +{
 +    if (!vector && PR_SUCCESS != freebl_RunLoaderOnce())
 +        return SECFailure;
-+    return (vector->p_CECPQ3_Decapsulate)(sharedSecret, ciphertext, secretKey);
++    return (vector->p_X25519Kyber512Draft00_Decapsulate)(sharedSecret, ciphertext, secretKey);
 +}
 diff --git a/lib/freebl/loader.h b/lib/freebl/loader.h
-index eb3046d27..e21505d9b 100644
+index eb3046d27..74ce37318 100644
 --- a/lib/freebl/loader.h
 +++ b/lib/freebl/loader.h
 @@ -10,7 +10,7 @@
@@ -3548,33 +3386,195 @@ index eb3046d27..e21505d9b 100644
  
      /* Add new function pointers at the end of this struct and bump
       * FREEBL_VERSION at the beginning of this file. */
-+    SECStatus (*p_CECPQ3_Generate)(SECItem **publicKey, SECItem **secretKey);
-+    SECStatus (*p_CECPQ3_Encapsulate)(SECItem **ciphertext, SECItem **sharedSecret, SECItem *publicKey);
-+    SECStatus (*p_CECPQ3_Decapsulate)(SECItem **sharedSecret, SECItem *ciphertext, SECItem *privateKey);
++    SECStatus (*p_X25519Kyber512Draft00_Generate)(SECItem **publicKey, SECItem **secretKey);
++    SECStatus (*p_X25519Kyber512Draft00_Encapsulate)(SECItem **ciphertext, SECItem **sharedSecret, SECItem *publicKey);
++    SECStatus (*p_X25519Kyber512Draft00_Decapsulate)(SECItem **sharedSecret, SECItem *ciphertext, SECItem *privateKey);
  };
  
  typedef struct FREEBLVectorStr FREEBLVector;
 diff --git a/lib/freebl/manifest.mn b/lib/freebl/manifest.mn
-index b6c5fb358..624657fd3 100644
+index b6c5fb358..518aa72a5 100644
 --- a/lib/freebl/manifest.mn
 +++ b/lib/freebl/manifest.mn
 @@ -151,6 +151,7 @@ CSRCS = \
  	tlsprfalg.c \
  	jpake.c \
  	secmpi.c \
-+	cecpq3.c \
++	x25519Kyber512.c \
  	$(MPI_SRCS) \
  	$(MPCPU_SRCS) \
  	$(ECL_SRCS) \
+diff --git a/lib/freebl/x25519Kyber512.c b/lib/freebl/x25519Kyber512.c
+new file mode 100644
+index 000000000..974598f59
+--- /dev/null
++++ b/lib/freebl/x25519Kyber512.c
+@@ -0,0 +1,156 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
++
++#ifdef FREEBL_NO_DEPEND
++#include "stubs.h"
++#endif
++
++#include "blapi.h"
++#include "secerr.h"
++#include "secitem.h"
++#include "ecl-priv.h"
++#include "ecl-curve.h"
++
++#include "kyber512/api.h"
++
++#define CHECK_OK(func) \
++    if (func == NULL)  \
++    goto cleanup
++#define CHECK_SEC_OK(func)         \
++    if (SECSuccess != (rv = func)) \
++    return SECFailure
++
++// TODO(goutam): Generate the classical key
++// Classical first, then PQ
++
++static SECStatus
++gf_populate_params_bytes(ECCurveName name, ECFieldType field_type, ECParams *params)
++{
++    SECStatus rv = SECFailure;
++    const ECCurveBytes *curveParams;
++
++    if ((name < ECCurve_noName) || (name > ECCurve_pastLastCurve))
++        goto cleanup;
++    params->name = name;
++    curveParams = ecCurve_map[params->name];
++    CHECK_OK(curveParams);
++    params->fieldID.size = curveParams->size;
++    params->fieldID.type = field_type;
++    if (field_type != ec_field_GFp && field_type != ec_field_plain) {
++        return SECFailure;
++    }
++    params->fieldID.u.prime.len = curveParams->scalarSize;
++    params->fieldID.u.prime.data = (unsigned char *)curveParams->irr;
++    params->curve.a.len = curveParams->scalarSize;
++    params->curve.a.data = (unsigned char *)curveParams->curvea;
++    params->curve.b.len = curveParams->scalarSize;
++    params->curve.b.data = (unsigned char *)curveParams->curveb;
++    params->base.len = curveParams->pointSize;
++    params->base.data = (unsigned char *)curveParams->base;
++    params->order.len = curveParams->scalarSize;
++    params->order.data = (unsigned char *)curveParams->order;
++    params->cofactor = curveParams->cofactor;
++
++    rv = SECSuccess;
++
++cleanup:
++    return rv;
++}
++
++SECStatus
++X25519Kyber512Draft00_Generate(SECItem **publicKey, SECItem **secretKey)
++{
++    SECStatus rv = SECFailure;
++
++    ECParams *params;
++    PLArenaPool *arena;
++    if (!(arena = PORT_NewArena(NSS_FREEBL_DEFAULT_CHUNKSIZE)))
++        return SECFailure;
++    params = (ECParams *)PORT_ArenaZAlloc(arena, sizeof(ECParams));
++    if (!params) {
++        PORT_FreeArena(arena, PR_TRUE);
++        return SECFailure;
++    }
++
++    CHECK_SEC_OK(gf_populate_params_bytes(ECCurve25519, ec_field_plain, params));
++
++    ECPrivateKey *x25519Key = NULL;
++    CHECK_SEC_OK(EC_NewKey(params, &x25519Key));
++
++    *publicKey = SECITEM_AllocItem(NULL, *publicKey, x25519Key->publicValue.len + PQCLEAN_KYBER512_CLEAN_CRYPTO_PUBLICKEYBYTES);
++    if (*publicKey == NULL) {
++        PORT_SetError(SEC_ERROR_NO_MEMORY);
++        return SECFailure;
++    }
++
++    *secretKey = SECITEM_AllocItem(NULL, *secretKey, x25519Key->privateValue.len + PQCLEAN_KYBER512_CLEAN_CRYPTO_SECRETKEYBYTES);
++    if (*secretKey == NULL) {
++        PORT_SetError(SEC_ERROR_NO_MEMORY);
++        return SECFailure;
++    }
++
++    /* Write out classical part first */
++    memcpy((*publicKey)->data, x25519Key->publicValue.data, 32);
++    memcpy((*secretKey)->data, x25519Key->privateValue.data, 32);
++
++    /* Generate PQ key */
++    int rc = PQCLEAN_KYBER512_CLEAN_crypto_kem_keypair((*publicKey)->data + x25519Key->publicValue.len,
++                                                       (*secretKey)->data + x25519Key->privateValue.len);
++    if (rc != 0) {
++        return SECFailure;
++    }
++
++    return SECSuccess;
++}
++
++SECStatus
++X25519Kyber512Draft00_Encapsulate(SECItem **ciphertext, SECItem **sharedSecret, SECItem *publicKey)
++{
++    SECStatus rv = SECFailure;
++    ECParams params;
++    CHECK_SEC_OK(gf_populate_params_bytes(ECCurve25519, ec_field_plain, &params));
++    ECPrivateKey *x25519Key;
++    CHECK_SEC_OK(EC_NewKey(&params, &x25519Key));
++
++    *ciphertext = SECITEM_AllocItem(NULL, *ciphertext, x25519Key->publicValue.len + PQCLEAN_KYBER512_CLEAN_CRYPTO_CIPHERTEXTBYTES);
++    if (*ciphertext == NULL) {
++        PORT_SetError(SEC_ERROR_NO_MEMORY);
++        return SECFailure;
++    }
++
++    *sharedSecret = SECITEM_AllocItem(NULL, *sharedSecret, 32 + PQCLEAN_KYBER512_CLEAN_CRYPTO_BYTES);
++    if (*sharedSecret == NULL) {
++        PORT_SetError(SEC_ERROR_NO_MEMORY);
++        return SECFailure;
++    }
++
++    ec_Curve25519_mul((*sharedSecret)->data, x25519Key->privateValue.data, publicKey->data);
++
++    memcpy((*ciphertext)->data, x25519Key->publicValue.data, 32);
++    int rc = PQCLEAN_KYBER512_CLEAN_crypto_kem_enc((*ciphertext)->data + x25519Key->publicValue.len, (*sharedSecret)->data + 32, publicKey->data);
++    if (rc != 0) {
++        return SECFailure;
++    }
++
++    return SECSuccess;
++}
++
++SECStatus
++X25519Kyber512Draft00_Decapsulate(SECItem **sharedSecret, SECItem *ciphertext, SECItem *secretKey)
++{
++    *sharedSecret = SECITEM_AllocItem(NULL, *sharedSecret, 32 + PQCLEAN_KYBER512_CLEAN_CRYPTO_BYTES);
++    if (*sharedSecret == NULL) {
++        PORT_SetError(SEC_ERROR_NO_MEMORY);
++        return SECFailure;
++    }
++    ec_Curve25519_mul((*sharedSecret)->data, secretKey->data, ciphertext->data);
++
++
++    int rc = PQCLEAN_KYBER512_CLEAN_crypto_kem_dec((*sharedSecret)->data + 32, ciphertext->data + 32, secretKey->data + 32);
++    if (rc != 0) {
++        return SECFailure;
++    }
++
++    return SECSuccess;
++}
 diff --git a/lib/pk11wrap/pk11akey.c b/lib/pk11wrap/pk11akey.c
-index 310d65662..53ca55089 100644
+index 310d65662..bf271b64c 100644
 --- a/lib/pk11wrap/pk11akey.c
 +++ b/lib/pk11wrap/pk11akey.c
 @@ -44,6 +44,13 @@ pk11_MakeIDFromPublicKey(SECKEYPublicKey *pubKey)
          case ecKey:
              pubKeyIndex = &pubKey->u.ec.publicValue;
              break;
-+        case cecpq3Key:
++        case x25519Kyber512Draft00Key:
 +        {
 +            unsigned char buf[1] = {0};
 +            pubKeyIndex = SECITEM_AllocItem(NULL, pubKeyIndex, 1);
@@ -3588,8 +3588,8 @@ index 310d65662..53ca55089 100644
              case CKK_EC:
                  keyType = ecKey;
                  break;
-+            case CKK_NSS_CECPQ3:
-+                keyType = cecpq3Key;
++            case CKK_NSS_X25519KYBER512DRAFT00:
++                keyType = x25519Kyber512Draft00Key;
 +                break;
              default:
                  PORT_SetError(SEC_ERROR_BAD_KEY);
@@ -3598,7 +3598,7 @@ index 310d65662..53ca55089 100644
                                             &pubKey->u.ec.DEREncodedParams, value,
                                             &pubKey->u.ec.publicValue);
              break;
-+        case cecpq3Key:
++        case x25519Kyber512Draft00Key:
 +            crv = CKR_OK;
 +            break;
          case fortezzaKey:
@@ -3608,8 +3608,8 @@ index 310d65662..53ca55089 100644
              case CKK_EC:
                  keyType = ecKey;
                  break;
-+            case CKK_NSS_CECPQ3:
-+                keyType = cecpq3Key;
++            case CKK_NSS_X25519KYBER512DRAFT00:
++                keyType = x25519Kyber512Draft00Key;
 +                break;
              default:
                  break;
@@ -3618,7 +3618,7 @@ index 310d65662..53ca55089 100644
          { CKA_MODIFIABLE, NULL, 0 },
      };
      SECKEYECParams *ecParams;
-+    CK_ATTRIBUTE cecpq3PubTemplate[] = {
++    CK_ATTRIBUTE x25519Kyber512Draft00PubTemplate[] = {
 +        { CKA_TOKEN, NULL, 0 },
 +        { CKA_DERIVE, NULL, 0 },
 +        { CKA_WRAP, NULL, 0 },
@@ -3635,7 +3635,7 @@ index 310d65662..53ca55089 100644
      }
  
 -    if (!param) {
-+    if (!param && type != CKM_NSS_CECPQ3_KEY_GEN) {
++    if (!param && type != CKM_NSS_X25519KYBER512DRAFT00_KEY_GEN) {
          PORT_SetError(SEC_ERROR_INVALID_ARGS);
          return NULL;
      }
@@ -3643,54 +3643,54 @@ index 310d65662..53ca55089 100644
                  test_mech2.mechanism = CKM_ECDSA;
              }
              break;
-+        case CKM_NSS_CECPQ3_KEY_GEN:
-+            test_mech.mechanism = CKM_NSS_CECPQ3_KEY_GEN;
-+            attrs = cecpq3PubTemplate;
-+            pubTemplate = cecpq3PubTemplate;
-+            keyType = cecpq3Key;
++        case CKM_NSS_X25519KYBER512DRAFT00_KEY_GEN:
++            test_mech.mechanism = CKM_NSS_X25519KYBER512DRAFT00_KEY_GEN;
++            attrs = x25519Kyber512Draft00PubTemplate;
++            pubTemplate = x25519Kyber512Draft00PubTemplate;
++            keyType = x25519Kyber512Draft00Key;
 +            break;
          default:
              PORT_SetError(SEC_ERROR_BAD_KEY);
              return NULL;
 diff --git a/lib/pk11wrap/pk11cert.c b/lib/pk11wrap/pk11cert.c
-index 84d830035..d7a951ffe 100644
+index 84d830035..1f7f5839e 100644
 --- a/lib/pk11wrap/pk11cert.c
 +++ b/lib/pk11wrap/pk11cert.c
 @@ -177,6 +177,7 @@ PK11_IsUserCert(PK11SlotInfo *slot, CERTCertificate *cert,
                  break;
              case keaKey:
              case fortezzaKey:
-+            case cecpq3Key:
++            case x25519Kyber512Draft00Key:
              case nullKey:
                  /* fall through and return false */
                  break;
 diff --git a/lib/pk11wrap/pk11mech.c b/lib/pk11wrap/pk11mech.c
-index 685f0e934..c57a330e0 100644
+index 685f0e934..3ac67a8eb 100644
 --- a/lib/pk11wrap/pk11mech.c
 +++ b/lib/pk11wrap/pk11mech.c
 @@ -425,6 +425,8 @@ PK11_GetKeyType(CK_MECHANISM_TYPE type, unsigned long len)
          case CKM_TLS_PRF_GENERAL:
          case CKM_NSS_TLS_PRF_GENERAL_SHA256:
              return CKK_GENERIC_SECRET;
-+        case CKM_NSS_CECPQ3_KEY_GEN:
-+            return CKK_NSS_CECPQ3;
++        case CKM_NSS_X25519KYBER512DRAFT00_KEY_GEN:
++            return CKK_NSS_X25519KYBER512DRAFT00;
          default:
              return pk11_lookup(type)->keyType;
      }
 diff --git a/lib/pk11wrap/pk11skey.c b/lib/pk11wrap/pk11skey.c
-index 66b4ed6a1..2c2af45ab 100644
+index 66b4ed6a1..9d3d06a5e 100644
 --- a/lib/pk11wrap/pk11skey.c
 +++ b/lib/pk11wrap/pk11skey.c
 @@ -2104,6 +2104,7 @@ PK11_PubDerive(SECKEYPrivateKey *privKey, SECKEYPublicKey *pubKey,
          case rsaKey:
          case rsaPssKey:
          case rsaOaepKey:
-+        case cecpq3Key:
++        case x25519Kyber512Draft00Key:
          case nullKey:
              PORT_SetError(SEC_ERROR_BAD_KEY);
              break;
 diff --git a/lib/pk11wrap/pk11slot.c b/lib/pk11wrap/pk11slot.c
-index 1b150888d..22038183c 100644
+index 1b150888d..48bc103d5 100644
 --- a/lib/pk11wrap/pk11slot.c
 +++ b/lib/pk11wrap/pk11slot.c
 @@ -93,7 +93,8 @@ static PK11SlotList
@@ -3699,7 +3699,7 @@ index 1b150888d..22038183c 100644
      pk11_sha256SlotList,
 -    pk11_sha512SlotList; /* slots do SHA512 and SHA384 */
 +    pk11_sha512SlotList, /* slots do SHA512 and SHA384 */
-+    pk11_cecpq3SlotList;
++    pk11_x25519Kyber512Draft00SlotList;
  
  /************************************************************
   * Generic Slot List and Slot List element manipulations
@@ -3707,7 +3707,7 @@ index 1b150888d..22038183c 100644
      pk11_InitSlotListStatic(&pk11_randomSlotList);
      pk11_InitSlotListStatic(&pk11_sha256SlotList);
      pk11_InitSlotListStatic(&pk11_sha512SlotList);
-+    pk11_InitSlotListStatic(&pk11_cecpq3SlotList);
++    pk11_InitSlotListStatic(&pk11_x25519Kyber512Draft00SlotList);
      return SECSuccess;
  }
  
@@ -3715,7 +3715,7 @@ index 1b150888d..22038183c 100644
      pk11_FreeSlotListStatic(&pk11_randomSlotList);
      pk11_FreeSlotListStatic(&pk11_sha256SlotList);
      pk11_FreeSlotListStatic(&pk11_sha512SlotList);
-+    pk11_FreeSlotListStatic(&pk11_cecpq3SlotList);
++    pk11_FreeSlotListStatic(&pk11_x25519Kyber512Draft00SlotList);
      return;
  }
  
@@ -3723,13 +3723,13 @@ index 1b150888d..22038183c 100644
              return &pk11_ideaSlotList;
          case CKM_FAKE_RANDOM:
              return &pk11_randomSlotList;
-+        case CKM_NSS_CECPQ3_KEY_GEN:
-+            return &pk11_cecpq3SlotList;
++        case CKM_NSS_X25519KYBER512DRAFT00_KEY_GEN:
++            return &pk11_x25519Kyber512Draft00SlotList;
      }
      return NULL;
  }
 diff --git a/lib/softoken/pkcs11.c b/lib/softoken/pkcs11.c
-index 28d219d8e..2539c70e7 100644
+index 28d219d8e..fdc615bb2 100644
 --- a/lib/softoken/pkcs11.c
 +++ b/lib/softoken/pkcs11.c
 @@ -606,7 +606,9 @@ static const struct mechanismList mechanisms[] = {
@@ -3738,8 +3738,8 @@ index 28d219d8e..2539c70e7 100644
      { CKM_NSS_IKE1_PRF_DERIVE, { 8, 64, CKF_DERIVE }, PR_TRUE },
 -    { CKM_NSS_IKE1_APP_B_PRF_DERIVE, { 8, 255 * 64, CKF_DERIVE }, PR_TRUE }
 +    { CKM_NSS_IKE1_APP_B_PRF_DERIVE, { 8, 255 * 64, CKF_DERIVE }, PR_TRUE },
-+    /* --------------------CECPQ3 ----------------------- */
-+    { CKM_NSS_CECPQ3_KEY_GEN, { 0, 0, CKF_GENERATE }, PR_TRUE },
++    /* --------------------X25519KYBER512DRAFT00 ----------------------- */
++    { CKM_NSS_X25519KYBER512DRAFT00_KEY_GEN, { 0, 0, CKF_GENERATE }, PR_TRUE },
  };
  static const CK_ULONG mechanismCount = sizeof(mechanisms) / sizeof(mechanisms[0]);
  
@@ -3747,7 +3747,7 @@ index 28d219d8e..2539c70e7 100644
              recover = CK_FALSE;
              wrap = CK_FALSE;
              break;
-+        case CKK_NSS_CECPQ3:
++        case CKK_NSS_X25519KYBER512DRAFT00:
 +            derive = CK_TRUE;
 +            verify = CK_FALSE;
 +            encrypt = CK_FALSE;
@@ -3761,7 +3761,7 @@ index 28d219d8e..2539c70e7 100644
              derive = CK_TRUE;
              createObjectInfo = PR_FALSE;
              break;
-+        case CKK_NSS_CECPQ3:
++        case CKK_NSS_X25519KYBER512DRAFT00:
 +            if (!sftk_hasAttribute(object, CKA_VALUE)) {
 +                return CKR_TEMPLATE_INCOMPLETE;
 +            }
@@ -3777,7 +3777,7 @@ index 28d219d8e..2539c70e7 100644
                  crv = CKR_ATTRIBUTE_VALUE_INVALID;
              }
              break;
-+        case CKK_NSS_CECPQ3:
++        case CKK_NSS_X25519KYBER512DRAFT00:
 +            crv = CKR_OK;
 +            break;
          default:
@@ -3788,26 +3788,26 @@ index 28d219d8e..2539c70e7 100644
              }
              break;
 -
-+        case CKK_NSS_CECPQ3:
++        case CKK_NSS_X25519KYBER512DRAFT00:
 +            break;
          default:
              crv = CKR_KEY_TYPE_INCONSISTENT;
              break;
 diff --git a/lib/softoken/pkcs11c.c b/lib/softoken/pkcs11c.c
-index a0ef85aca..b45074d20 100644
+index a0ef85aca..6bb7486d4 100644
 --- a/lib/softoken/pkcs11c.c
 +++ b/lib/softoken/pkcs11c.c
 @@ -5677,6 +5677,32 @@ NSC_GenerateKeyPair(CK_SESSION_HANDLE hSession,
              PORT_FreeArena(ecPriv->ecParams.arena, PR_TRUE);
              break;
  
-+        case CKM_NSS_CECPQ3_KEY_GEN:
-+            key_type = CKK_NSS_CECPQ3;
++        case CKM_NSS_X25519KYBER512DRAFT00_KEY_GEN:
++            key_type = CKK_NSS_X25519KYBER512DRAFT00;
 +
 +            SECItem *pub = NULL;
 +            SECItem *priv = NULL;
 +
-+            rv = CECPQ3_Generate(&pub, &priv);
++            rv = X25519Kyber512Draft00_Generate(&pub, &priv);
 +            if (rv != SECSuccess) {
 +                crv = sftk_MapCryptError(PORT_GetError());
 +                break;
@@ -3835,43 +3835,43 @@ index a0ef85aca..b45074d20 100644
      }
  
 -    if (crv == CKR_OK) {
-+    if (crv == CKR_OK && key_type != CKK_NSS_CECPQ3) {
++    if (crv == CKR_OK && key_type != CKK_NSS_X25519KYBER512DRAFT00) {
          /* Perform FIPS 140-2 pairwise consistency check. */
          crv = sftk_PairwiseConsistencyCheck(hSession, slot,
                                              publicKey, privateKey, key_type);
 diff --git a/lib/ssl/manifest.mn b/lib/ssl/manifest.mn
-index fedc42b4e..506dddf1e 100644
+index fedc42b4e..9d369f814 100644
 --- a/lib/ssl/manifest.mn
 +++ b/lib/ssl/manifest.mn
 @@ -63,6 +63,7 @@ CSRCS = \
          tls13psk.c \
          tls13replay.c \
          tls13subcerts.c \
-+        tls13cecpq3.c \
++        tls13x25519Kyber512.c \
          $(NULL)
  
  LIBRARY_NAME = ssl
 diff --git a/lib/ssl/ssl.gyp b/lib/ssl/ssl.gyp
-index 2aa35cc96..e9446cee5 100644
+index 2aa35cc96..5436e0f3e 100644
 --- a/lib/ssl/ssl.gyp
 +++ b/lib/ssl/ssl.gyp
 @@ -52,6 +52,7 @@
          'tls13psk.c',
          'tls13replay.c',
          'tls13subcerts.c',
-+        'tls13cecpq3.c',
++        'tls13x25519Kyber512.c',
        ],
        'conditions': [
          [ 'OS=="win"', {
 diff --git a/lib/ssl/ssl3con.c b/lib/ssl/ssl3con.c
-index ad7480586..24766964a 100644
+index ad7480586..8f599edc0 100644
 --- a/lib/ssl/ssl3con.c
 +++ b/lib/ssl/ssl3con.c
 @@ -377,6 +377,7 @@ static const CK_MECHANISM_TYPE kea_alg_defs[] = {
      CKM_ECDH1_DERIVE,      /* ssl_kea_ecdh_psk */
      CKM_DH_PKCS_DERIVE,    /* ssl_kea_dh_psk */
      CKM_INVALID_MECHANISM, /* ssl_kea_tls13_any */
-+    CKM_INVALID_MECHANISM, /* ssl_kea_cecpq3 */
++    CKM_INVALID_MECHANISM, /* ssl_kea_x25519Kyber512Draft00 */
  };
  PR_STATIC_ASSERT(PR_ARRAY_SIZE(kea_alg_defs) == ssl_kea_size);
  
@@ -3879,14 +3879,14 @@ index ad7480586..24766964a 100644
          case ssl_kea_ecdh_psk:
              return ssl_NamedGroupTypeEnabled(ss, ssl_kea_ecdh);
  
-+        case ssl_kea_cecpq3:
-+            return ssl_NamedGroupTypeEnabled(ss, ssl_kea_cecpq3);
++        case ssl_kea_x25519Kyber512Draft00:
++            return ssl_NamedGroupTypeEnabled(ss, ssl_kea_x25519Kyber512Draft00);
 +
          case ssl_kea_tls13_any:
              return PR_TRUE;
  
 diff --git a/lib/ssl/sslimpl.h b/lib/ssl/sslimpl.h
-index 5a9da21a0..e3a5d2eb8 100644
+index 5a9da21a0..33ef448b4 100644
 --- a/lib/ssl/sslimpl.h
 +++ b/lib/ssl/sslimpl.h
 @@ -128,7 +128,7 @@ typedef enum { SSLAppOpRead = 0,
@@ -3910,34 +3910,34 @@ index 5a9da21a0..e3a5d2eb8 100644
  SECStatus SSLExp_EnableTls13BackendEch(PRFileDesc *fd, PRBool enabled);
  SECStatus SSLExp_CallExtensionWriterOnEchInner(PRFileDesc *fd, PRBool enabled);
  
-+/* CECPQ3 */
++/* X25519Kyber512Draft00 */
 +
-+SECStatus tls13_GenerateCECPQ3KeyPair(const sslSocket *ss, const sslNamedGroupDef *group, sslEphemeralKeyPair **keyPair);
++SECStatus tls13_GenerateX25519Kyber512Draft00KeyPair(const sslSocket *ss, const sslNamedGroupDef *group, sslEphemeralKeyPair **keyPair);
 +
  SEC_END_PROTOS
  
  #if defined(XP_UNIX) || defined(XP_OS2) || defined(XP_BEOS)
 diff --git a/lib/ssl/sslsock.c b/lib/ssl/sslsock.c
-index 6b40be759..252ed0978 100644
+index 6b40be759..915d721b2 100644
 --- a/lib/ssl/sslsock.c
 +++ b/lib/ssl/sslsock.c
 @@ -159,6 +159,7 @@ static const PRUint16 srtpCiphers[] = {
      }
  
  const sslNamedGroupDef ssl_named_groups[] = {
-+    { ssl_grp_cecpq3, 128, ssl_kea_cecpq3, 0, PR_TRUE },
++    { ssl_grp_x25519Kyber512Draft00, 128, ssl_kea_x25519Kyber512Draft00, 0, PR_TRUE },
      /* Note that 256 for 25519 is a lie, but we only use it for checking bit
       * security and expect 256 bits there (not 255). */
      { ssl_grp_ec_curve25519, 256, ssl_kea_ecdh, SEC_OID_CURVE25519, PR_TRUE },
 diff --git a/lib/ssl/sslt.h b/lib/ssl/sslt.h
-index 59e82e34d..fc08a184f 100644
+index 59e82e34d..6fac8bc08 100644
 --- a/lib/ssl/sslt.h
 +++ b/lib/ssl/sslt.h
 @@ -83,6 +83,7 @@ typedef enum {
      ssl_kea_ecdh_psk = 5,
      ssl_kea_dh_psk = 6,
      ssl_kea_tls13_any = 7,
-+    ssl_kea_cecpq3 = 8,
++    ssl_kea_x25519Kyber512Draft00 = 8,
      ssl_kea_size /* number of ssl_kea_ algorithms */
  } SSLKEAType;
  
@@ -3947,65 +3947,12 @@ index 59e82e34d..fc08a184f 100644
      ssl_grp_none = 65537,        /* special value */
 -    ssl_grp_ffdhe_custom = 65538 /* special value */
 +    ssl_grp_ffdhe_custom = 65538, /* special value */
-+    ssl_grp_cecpq3 = 0xfe30
++    ssl_grp_x25519Kyber512Draft00 = 0xfe30
  } SSLNamedGroup;
  
  typedef struct SSLExtraServerCertDataStr {
-diff --git a/lib/ssl/tls13cecpq3.c b/lib/ssl/tls13cecpq3.c
-new file mode 100644
-index 000000000..79027b9e5
---- /dev/null
-+++ b/lib/ssl/tls13cecpq3.c
-@@ -0,0 +1,47 @@
-+/* -*- Mode: C; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 4 -*- */
-+/*
-+ *
-+ * This Source Code Form is subject to the terms of the Mozilla Public
-+ * License, v. 2.0. If a copy of the MPL was not distributed with this
-+ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
-+
-+#include "secitem.h"
-+#include "sslimpl.h"
-+#include "pk11func.h"
-+#include "blapi.h"
-+
-+SECStatus
-+tls13_GenerateCECPQ3KeyPair(const sslSocket *ss,
-+                            const sslNamedGroupDef *group,
-+                            sslEphemeralKeyPair **keyPair)
-+{
-+    SECKEYPrivateKey *privKey = NULL;
-+    SECKEYPublicKey *pubKey = NULL;
-+    sslEphemeralKeyPair *pair;
-+
-+    PK11SlotInfo *slot = PK11_GetBestSlot(CKM_NSS_CECPQ3_KEY_GEN, NULL);
-+    if (!slot) {
-+        return SECFailure;
-+    }
-+
-+    privKey = PK11_GenerateKeyPair(slot, CKM_NSS_CECPQ3_KEY_GEN, NULL, &pubKey,
-+                                 PR_FALSE, PR_FALSE, NULL);
-+    PK11_FreeSlot(slot);
-+
-+
-+    if (!privKey || !pubKey ||
-+        !(pair = ssl_NewEphemeralKeyPair(group, privKey, pubKey))) {
-+        if (privKey) {
-+            SECKEY_DestroyPrivateKey(privKey);
-+        }
-+        if (pubKey) {
-+            SECKEY_DestroyPublicKey(pubKey);
-+        }
-+        ssl_MapLowLevelError(SEC_ERROR_KEYGEN_FAIL);
-+        return SECFailure;
-+    }
-+
-+    *keyPair = pair;
-+
-+    return SECSuccess;
-+}
 diff --git a/lib/ssl/tls13con.c b/lib/ssl/tls13con.c
-index 51dfebff3..2d822ad4d 100644
+index 51dfebff3..df0688e20 100644
 --- a/lib/ssl/tls13con.c
 +++ b/lib/ssl/tls13con.c
 @@ -26,6 +26,7 @@
@@ -4020,8 +3967,8 @@ index 51dfebff3..2d822ad4d 100644
                  return SECFailure;
              }
              break;
-+        case ssl_kea_cecpq3:
-+            rv = tls13_GenerateCECPQ3KeyPair(ss, groupDef, keyPair);
++        case ssl_kea_x25519Kyber512Draft00:
++            rv = tls13_GenerateX25519Kyber512Draft00KeyPair(ss, groupDef, keyPair);
 +            if (rv != SECSuccess) {
 +                return SECFailure;
 +            }
@@ -4038,10 +3985,10 @@ index 51dfebff3..2d822ad4d 100644
 -    if (rv != SECSuccess) {
 -        return rv;
 -    }
-+    if (peerShare->group->name == ssl_grp_cecpq3) {
++    if (peerShare->group->name == ssl_grp_x25519Kyber512Draft00) {
 +        SECItem *sharedSecret = NULL;
 +        ss->keyShareToSend = NULL;
-+        rv = CECPQ3_Encapsulate(&ss->keyShareToSend, &sharedSecret, &peerShare->key_exchange);
++        rv = X25519Kyber512Draft00_Encapsulate(&ss->keyShareToSend, &sharedSecret, &peerShare->key_exchange);
 +        if (rv != SECSuccess) {
 +            return rv;
 +        }
@@ -4096,10 +4043,10 @@ index 51dfebff3..2d822ad4d 100644
                  ss->statelessResume ? ssl_kea_dh_psk : ssl_kea_dh;
              ss->sec.keaType = ssl_kea_dh;
              break;
-+        case ssl_kea_cecpq3:
++        case ssl_kea_x25519Kyber512Draft00:
 +            // TODO(goutam): Look into resumption
-+            ss->ssl3.hs.kea_def_mutable.exchKeyType = ssl_kea_cecpq3;
-+            ss->sec.keaType = ssl_kea_cecpq3;
++            ss->ssl3.hs.kea_def_mutable.exchKeyType = ssl_kea_x25519Kyber512Draft00;
++            ss->sec.keaType = ssl_kea_x25519Kyber512Draft00;
 +            break;
          default:
              PORT_Assert(0);
@@ -4108,7 +4055,7 @@ index 51dfebff3..2d822ad4d 100644
      }
  
      PORT_Assert(ssl_NamedGroupEnabled(ss, entry->group));
-+    if (entry->group->name == ssl_grp_cecpq3) {
++    if (entry->group->name == ssl_grp_x25519Kyber512Draft00) {
 +        SECItem privateKey;
 +        SECItem *sharedSecret = NULL;
  
@@ -4122,7 +4069,7 @@ index 51dfebff3..2d822ad4d 100644
 +            return rv;
 +        }
 +
-+        rv = CECPQ3_Decapsulate(&sharedSecret, &entry->key_exchange, &privateKey);
++        rv = X25519Kyber512Draft00_Decapsulate(&sharedSecret, &entry->key_exchange, &privateKey);
 +        if (rv != SECSuccess) {
 +            return rv;
 +        }
@@ -4148,15 +4095,15 @@ index 51dfebff3..2d822ad4d 100644
      tls13_SetKeyExchangeType(ss, entry->group);
      ss->sec.keaKeyBits = SECKEY_PublicKeyStrengthInBits(keyPair->keys->pubKey);
 diff --git a/lib/ssl/tls13exthandle.c b/lib/ssl/tls13exthandle.c
-index 6acdf2473..c3c75c7b7 100644
+index 6acdf2473..6f844a64a 100644
 --- a/lib/ssl/tls13exthandle.c
 +++ b/lib/ssl/tls13exthandle.c
 @@ -83,6 +83,8 @@ tls13_SizeOfKeyShareEntry(const SECKEYPublicKey *pubKey)
              return 2 + 2 + pubKey->u.ec.publicValue.len;
          case dhKey:
              return 2 + 2 + pubKey->u.dh.prime.len;
-+        case cecpq3Key:
-+            return 2 + 2 + 32 + CECPQ3_PUBLICKEYBYTES;
++        case x25519Kyber512Draft00Key:
++            return 2 + 2 + 32 + X25519KYBER512DRAFT00_PUBLICKEYBYTES;
          default:
              PORT_Assert(0);
      }
@@ -4164,7 +4111,7 @@ index 6acdf2473..c3c75c7b7 100644
          case dhKey:
              rv = ssl_AppendPaddedDHKeyShare(buf, pubKey, PR_FALSE);
              break;
-+        case cecpq3Key:
++        case x25519Kyber512Draft00Key:
 +        {
 +            SECItem pubKeyRaw;
 +            rv = PK11_ReadRawAttribute(PK11_TypePubKey, pubKey, CKA_VALUE, &pubKeyRaw);
@@ -4186,8 +4133,8 @@ index 6acdf2473..c3c75c7b7 100644
 -    PORT_Assert(!PR_CLIST_IS_EMPTY(&ss->ephemeralKeyPairs));
 -    PORT_Assert(PR_PREV_LINK(&ss->ephemeralKeyPairs) ==
 -                PR_NEXT_LINK(&ss->ephemeralKeyPairs));
-+    if (ss->sec.keaGroup->keaType == ssl_kea_cecpq3) {
-+        rv = sslBuffer_AppendNumber(buf, ssl_grp_cecpq3, 2);
++    if (ss->sec.keaGroup->keaType == ssl_kea_x25519Kyber512Draft00) {
++        rv = sslBuffer_AppendNumber(buf, ssl_grp_x25519Kyber512Draft00, 2);
 +        if (rv != SECSuccess)
 +            return SECFailure;
 +        rv = sslBuffer_AppendNumber(buf, ss->keyShareToSend->len, 2);
@@ -4217,15 +4164,68 @@ index 6acdf2473..c3c75c7b7 100644
      }
  
      *added = PR_TRUE;
+diff --git a/lib/ssl/tls13x25519Kyber512.c b/lib/ssl/tls13x25519Kyber512.c
+new file mode 100644
+index 000000000..19835c2bd
+--- /dev/null
++++ b/lib/ssl/tls13x25519Kyber512.c
+@@ -0,0 +1,47 @@
++/* -*- Mode: C; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 4 -*- */
++/*
++ *
++ * This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
++
++#include "secitem.h"
++#include "sslimpl.h"
++#include "pk11func.h"
++#include "blapi.h"
++
++SECStatus
++tls13_GenerateX25519Kyber512Draft00KeyPair(const sslSocket *ss,
++                            const sslNamedGroupDef *group,
++                            sslEphemeralKeyPair **keyPair)
++{
++    SECKEYPrivateKey *privKey = NULL;
++    SECKEYPublicKey *pubKey = NULL;
++    sslEphemeralKeyPair *pair;
++
++    PK11SlotInfo *slot = PK11_GetBestSlot(CKM_NSS_X25519KYBER512DRAFT00_KEY_GEN, NULL);
++    if (!slot) {
++        return SECFailure;
++    }
++
++    privKey = PK11_GenerateKeyPair(slot, CKM_NSS_X25519KYBER512DRAFT00_KEY_GEN, NULL, &pubKey,
++                                 PR_FALSE, PR_FALSE, NULL);
++    PK11_FreeSlot(slot);
++
++
++    if (!privKey || !pubKey ||
++        !(pair = ssl_NewEphemeralKeyPair(group, privKey, pubKey))) {
++        if (privKey) {
++            SECKEY_DestroyPrivateKey(privKey);
++        }
++        if (pubKey) {
++            SECKEY_DestroyPublicKey(pubKey);
++        }
++        ssl_MapLowLevelError(SEC_ERROR_KEYGEN_FAIL);
++        return SECFailure;
++    }
++
++    *keyPair = pair;
++
++    return SECSuccess;
++}
 diff --git a/lib/util/pkcs11n.h b/lib/util/pkcs11n.h
-index cb7672048..14387ae62 100644
+index cb7672048..bc2382122 100644
 --- a/lib/util/pkcs11n.h
 +++ b/lib/util/pkcs11n.h
 @@ -55,6 +55,8 @@
  
  #define CKK_NSS_CHACHA20 (CKK_NSS + 4)
  
-+#define CKK_NSS_CECPQ3 (CKK_NSS + 5)
++#define CKK_NSS_X25519KYBER512DRAFT00 (CKK_NSS + 5)
 +
  /*
   * NSS-defined certificate types
@@ -4234,8 +4234,8 @@ index cb7672048..14387ae62 100644
  #define CKM_NSS_SP800_108_FEEDBACK_KDF_DERIVE_DATA (CKM_NSS + 43)
  #define CKM_NSS_SP800_108_DOUBLE_PIPELINE_KDF_DERIVE_DATA (CKM_NSS + 44)
  
-+/* CECPQ3 */
-+#define CKM_NSS_CECPQ3_KEY_GEN (CKM_NSS + 45)
++/* X25519KYBER512DRAFT00 */
++#define CKM_NSS_X25519KYBER512DRAFT00_KEY_GEN (CKM_NSS + 45)
 +
  /*
   * HISTORICAL:

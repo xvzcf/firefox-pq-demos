@@ -1,3 +1,15 @@
+diff --git a/netwerk/protocol/http/Http2Session.cpp b/netwerk/protocol/http/Http2Session.cpp
+--- a/netwerk/protocol/http/Http2Session.cpp
++++ b/netwerk/protocol/http/Http2Session.cpp
+@@ -4229,7 +4229,7 @@ nsresult Http2Session::ConfirmTLSProfile
+   }
+ 
+   uint16_t kea = ssl->GetKEAUsed();
+-  if (kea != ssl_kea_dh && kea != ssl_kea_ecdh) {
++  if (kea != ssl_kea_dh && kea != ssl_kea_ecdh && kea != ssl_kea_x25519Kyber512Draft00) {
+     LOG3(("Http2Session::ConfirmTLSProfile %p FAILED due to invalid KEA %d\n",
+           this, kea));
+     return SessionError(INADEQUATE_SECURITY);
 diff --git a/security/manager/ssl/nsNSSCallbacks.cpp b/security/manager/ssl/nsNSSCallbacks.cpp
 --- a/security/manager/ssl/nsNSSCallbacks.cpp
 +++ b/security/manager/ssl/nsNSSCallbacks.cpp
@@ -5,8 +17,8 @@ diff --git a/security/manager/ssl/nsNSSCallbacks.cpp b/security/manager/ssl/nsNS
  nsCString getKeaGroupName(uint32_t aKeaGroup) {
    nsCString groupName;
    switch (aKeaGroup) {
-+    case ssl_grp_cecpq3:
-+      groupName = "CECPQ3"_ns;
++    case ssl_grp_x25519Kyber512Draft00:
++      groupName = "X25519Kyber512Draft00"_ns;
 +      break;
      case ssl_grp_ec_secp256r1:
        groupName = "P256"_ns;
@@ -15,7 +27,7 @@ diff --git a/security/manager/ssl/nsNSSCallbacks.cpp b/security/manager/ssl/nsNS
              AccumulateECCCurve(Telemetry::SSL_KEA_ECDHE_CURVE_FULL,
                                 channelInfo.keaKeyBits);
              break;
-+          case ssl_kea_cecpq3:
++          case ssl_kea_x25519Kyber512Draft00:
 +            break;
            default:
              MOZ_CRASH("impossible KEA");
@@ -30,7 +42,7 @@ diff --git a/security/manager/ssl/nsNSSIOLayer.cpp b/security/manager/ssl/nsNSSI
 -  const SSLNamedGroup namedGroups[] = {
 -      ssl_grp_ec_curve25519, ssl_grp_ec_secp256r1, ssl_grp_ec_secp384r1,
 -      ssl_grp_ec_secp521r1,  ssl_grp_ffdhe_2048,   ssl_grp_ffdhe_3072};
-+  const SSLNamedGroup namedGroups[] = { ssl_grp_cecpq3 };
++  const SSLNamedGroup namedGroups[] = { ssl_grp_x25519Kyber512Draft00 };
    if (SECSuccess != SSL_NamedGroupConfig(fd, namedGroups,
                                           mozilla::ArrayLength(namedGroups))) {
      return NS_ERROR_FAILURE;
